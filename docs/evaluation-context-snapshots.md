@@ -38,3 +38,20 @@ and supplied unchanged to `TextContextCalls`. An answer is not reinserted into
 the source Context. This API provides evidence isolation and bounded storage;
 it does not certify model quality, source authenticity, financial settlement or
 the complete recording A/B/C runtime.
+
+Recording execution lineage is explicit per operation. TextContextCalls,
+VisualContextCalls, and SmolVLMCalls accept `evaluation_relationship` (`root`,
+`retry`, or `escalation`) and `evaluation_predecessor`. The default root call
+keeps legacy observer reservation arguments unchanged. Nonroot calls require
+an owner-issued RecordingScope and original NativeEntryBinding from the same
+recording and scope; the recording session additionally checks the earlier
+actual entry and identical retained evidence before reserving. A predecessor
+can cross small/strong provider bindings within that scope. No adapter keeps
+an ambient previous task or previous entry.
+
+A recording operation ticket exposes `entry_reference()` only after its actual
+callback entered. This immutable NativeOperationRef includes exact entry,
+worker, source-evidence, and request provenance; direct source callbacks have
+no semantic prompt. `semantic_entry_binding()` is available only for actual
+semantic entries and can be used for a later explicit retry/escalation. These
+references do not certify billing, remote model execution, or output quality.

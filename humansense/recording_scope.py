@@ -76,6 +76,28 @@ def validate_evaluation_backend(observer, backend):
         owner.validate_backend(observer, backend)
 
 
+def evaluation_lineage(observer, relationship='root', predecessor=None):
+    """Capture explicit lineage before await, without changing legacy kwargs."""
+    if relationship not in ('root', 'retry', 'escalation'):
+        raise ValueError('explicit root/retry/escalation relationship required')
+    if relationship == 'root':
+        if predecessor is not None: raise ValueError('root cannot have a predecessor')
+        return {}
+    from .native_entry import NativeEntryBinding
+    if type(observer) is not RecordingScope:
+        raise ValueError('nonroot lineage requires an immutable recording scope')
+    evaluation_owner(observer)
+    if type(predecessor) is not NativeEntryBinding:
+        raise TypeError('original actual-entry predecessor required')
+    value = predecessor.snapshot()
+    owner = observer.binding_owner()
+    if (value['owner_kind'] != 'recording_native4' or
+            value['owner']['context'] != owner['context'] or
+            value['owner']['scope_index'] != observer.scope_index):
+        raise ValueError('predecessor belongs to another recording or scope')
+    return dict(relationship=relationship, predecessor=predecessor)
+
+
 def validate_evaluation_worker_scope(observer, scope=None):
     """Resolve explicit process lifecycle ownership before worker startup."""
     resolved = resolve_evaluation_observer(observer, scope)

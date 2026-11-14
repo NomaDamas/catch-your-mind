@@ -8,7 +8,7 @@ from copy import deepcopy
 from .capabilities import bounded_json, identifier
 from .call_controller import _digest
 from .schema import timestamp
-from .recording_scope import resolve_evaluation_observer, validate_evaluation_backend
+from .recording_scope import resolve_evaluation_observer, validate_evaluation_backend, evaluation_lineage
 from .streams import _finish
 from .native_entry import BoundCompletion,PreparedCall
 
@@ -94,20 +94,21 @@ class TextContextCalls:
                 return {'accepted':False}
             raise ValueError('completion request is no longer available')
 
-    async def execute(self,request_id,record,question,*,maximum_charge,ttl_ms=1000,evaluation_scope=None):
+    async def execute(self,request_id,record,question,*,maximum_charge,ttl_ms=1000,evaluation_scope=None,evaluation_relationship='root',evaluation_predecessor=None):
         self.human._check()
         if self._closed:raise RuntimeError('adapter closed')
         if self._active is not None:raise RuntimeError('adapter busy; no hidden queue')
         observer=resolve_evaluation_observer(self._evaluation_observer,evaluation_scope)
         backend=self._completion;validate_evaluation_backend(observer,backend)
+        lineage=evaluation_lineage(observer,evaluation_relationship,evaluation_predecessor)
         request,evidence=self._prepare(request_id,record,question)
-        return await self._start(request_id,request,evidence,maximum_charge,ttl_ms,observer,backend)
+        return await self._start(request_id,request,evidence,maximum_charge,ttl_ms,observer,backend,lineage)
 
-    async def _start(self,request_id,request,evidence,maximum_charge,ttl_ms,observer,backend):
+    async def _start(self,request_id,request,evidence,maximum_charge,ttl_ms,observer,backend,lineage):
         self.human._check()
         if self._closed:raise RuntimeError('adapter closed')
         if self._active is not None:raise RuntimeError('adapter busy; no hidden queue')
-        task=asyncio.create_task(self._execute(request_id,request,evidence,maximum_charge,ttl_ms,observer,backend))
+        task=asyncio.create_task(self._execute(request_id,request,evidence,maximum_charge,ttl_ms,observer,backend,lineage))
         self._active=task
         try:return await asyncio.shield(task)
         except asyncio.CancelledError:
@@ -120,7 +121,7 @@ class TextContextCalls:
     async def _prepare_execution(self,request):
         return request
 
-    async def _execute(self,request_id,request,evidence,maximum_charge,ttl_ms,observer,backend):
+    async def _execute(self,request_id,request,evidence,maximum_charge,ttl_ms,observer,backend,lineage):
         dispatched=completed=False
         ticket=None;prepared=None;outcome="unadmitted"
         try:
@@ -130,7 +131,7 @@ class TextContextCalls:
             prompt_sha=_digest(request)
             if observer is not None:
                 ticket=observer.reserve_call(self.controller,request_id,provider=self._provider,
-                    model_revision=self._revision,prompt_sha256=prompt_sha)
+                    model_revision=self._revision,prompt_sha256=prompt_sha,**lineage)
             if isinstance(backend,BoundCompletion):
                 if ticket is None or not callable(getattr(ticket,'invoke_bound',None)):
                     raise ValueError('bound completion requires an actual-entry observer')

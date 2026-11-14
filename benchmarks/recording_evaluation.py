@@ -476,6 +476,35 @@ class _Call:
         self.entry=None;self.worker=None;self.instance_id=None;self._dispatched=False;self._revoked=False
         self._finished=False;self._released=False;self._result=None
 
+    def entry_reference(self):
+        """Return only this ticket's actual entry, including direct callbacks."""
+        from humansense.native_operation import _issue_operation_reference
+        s=self.session
+        with s._lock:
+            if self.entry is None:return None
+            row=struct.unpack_from('<IIIIQII32s32s32s',s._entry_table,self.entry*128)
+            return _issue_operation_reference(dict(context=dict(s.context),scope_index=row[1],
+                binding_index=row[2],ticket_ordinal=row[0],entry_ordinal=self.entry,
+                instance_sha256=self.instance_id,worker_ordinal=row[3],
+                entered_event_sha256=s._entry_digests[self.entry*32:(self.entry+1)*32].hex(),
+                request_sha256=row[8].hex(),evidence_sha256=row[7].hex(),
+                prompt_sha256=None if row[9]==b'\0'*32 else row[9].hex()))
+
+    def semantic_entry_binding(self):
+        """Expose an immutable semantic binding after actual ordinary invoke."""
+        from humansense.native_entry import _issue_entry_binding
+        ref=self.entry_reference()
+        if ref is None:return None
+        value=ref.snapshot()
+        if value['prompt_sha256'] is None:raise ValueError('semantic prompt identity required')
+        binding=self.session._binding(self.scope)
+        return _issue_entry_binding(dict(schema_version=1,owner_kind='recording_native4',
+            owner=self.session.binding_owner(self.scope),entry=dict(ticket_ordinal=value['ticket_ordinal'],
+                entry_ordinal=value['entry_ordinal'],instance_sha256=value['instance_sha256'],
+                request_decision_sha256=value['request_sha256'],entered_event_sha256=value['entered_event_sha256']),
+            provider=binding['provider'],model_revision=binding['model_revision'],role=binding['role'],
+            prompt_sha256=value['prompt_sha256']))
+
     def dispatched(self):
         s=self.session
         with s._lock:
