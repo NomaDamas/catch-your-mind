@@ -1,10 +1,14 @@
-# Remaining sensory delivery gates — 2026-11-14 audit
+# Remaining sensory delivery gates — 2026-11-15 software continuation
 
 The approved scope remains all24 families in [the acceptance map](perception-acceptance.md),
 plus the cross-cutting streaming, API/MCP, profiling and measured efficiency gates.
 Recent text/visual client execution and cost instrumentation do not complete the
 sensory provider inventory. This document records newly isolated gaps, not an
-exhaustive replacement of the acceptance map or a reduced MVP.
+exhaustive replacement of the acceptance map or a reduced MVP. The user's
+[software continuation direction](perception-expansion-plan.md#user-directed-software-continuation-2026-11-15)
+defers actual experiments, model installation and model/sensor validation until
+after this software phase. The [candidate matrix](candidate-execution-matrix.md)
+separately inventories selected implementations and unsupported alternatives.
 
 ## Merged recording and transport evidence software
 
@@ -32,7 +36,14 @@ Each PR passed independent exact-head review, its final full suite and CI.
 The software prerequisites #269, #275 and #276 are closed. The persistent
 A/B/C execution composition [#270](https://github.com/NomaDamas/Gamst/issues/270)
 and full-lifetime matched-source evaluation
-[#274](https://github.com/NomaDamas/Gamst/issues/274) remain in development.
+[#274](https://github.com/NomaDamas/Gamst/issues/274) now have integrated software
+in the continuation branch: owned persistent child execution, retained success
+and failed-prefix evidence, frozen source/task windows, original response joins,
+and bounded full-lifetime financial reconciliation. The 20-recording A/B/C
+regression exercises 60 actual fixture child executions and finalizes their
+synthetic financial originals. It is software evidence, not an actual-model
+experiment. Final CI, independent review and merge evidence are recorded in the
+integration PR; no merge is inferred from this document.
 These six work items are one implementation batch, not a denominator for overall
 project completion.
 
@@ -116,9 +127,16 @@ written requirements and evidence, not inferred from GitHub status alone.
   [#154](https://github.com/NomaDamas/Gamst/issues/154): explicit text/local-small/
   external-visual execution exists; full written integration/evidence scope is
   not proven complete.
-- [#161](https://github.com/NomaDamas/Gamst/issues/161): explicit client attempts
-  now bind actual controller evidence; whole-pipeline coverage, local-worker/
-  perception instrumentation and actual evaluated runs still require work.
+- [#161](https://github.com/NomaDamas/Gamst/issues/161): explicit client attempts,
+  local-worker/perception operations and owned runtime lifetimes now bind
+  retained native evidence. Actual-model evaluated runs and deployment coverage
+  remain unverified; synthetic whole-runtime checks do not close that gate.
+
+The exact meaning and upstream identity of “multimodal Jev/cheap Jev” remain
+unresolved under [#136](https://github.com/NomaDamas/Gamst/issues/136). No guessed
+candidate is presented as its implementation. Along with RF research assets
+#189 and authentic per-request billing #257/#277, this is an explicit external
+prerequisite, not a passed software or product acceptance check.
 
 No model weights were installed by this audit. Hardware purchases are not
 implied by implementation authorization. Software work can continue while missing
