@@ -6,9 +6,11 @@ files under the caller's empty, task-owned directory; it never installs assets.
 from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
+from importlib import metadata as package_metadata
 from itertools import permutations
 from pathlib import Path
 import sysconfig
+import unittest
 
 from benchmarks.recorded_profiles import FixtureBGR, PCMLevel
 from benchmarks.recording_dependencies import distribution_descriptor, verify_dependencies
@@ -37,6 +39,13 @@ class RuntimeFixture:
 
 def installed_dependencies():
     """Verify existing visual dependencies through the production owned reader."""
+    # Core CI intentionally has no vision extras. Missing packages are optional;
+    # installed-but-invalid metadata must still fail the owned production reader.
+    for name in ('numpy', 'opencv-python'):
+        try:
+            package_metadata.distribution(name)
+        except package_metadata.PackageNotFoundError as exc:
+            raise unittest.SkipTest('existing optional vision distributions required') from exc
     roots = (Path(sysconfig.get_paths()['data']),)
     metadata = (Path(sysconfig.get_paths()['purelib']),)
     entries = []
