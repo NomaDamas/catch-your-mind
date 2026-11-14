@@ -47,6 +47,8 @@ class FinancialRunView:
     """
     execution_sha256: str
     run_inventory_sha256: str
+    execution_inventory_sha256: str
+    parent_receipt_inventory_sha256: str
     invocation_ordinal: int
     stream_id: str
     recording_id: str
@@ -78,6 +80,7 @@ class FinancialRunView:
         keys(values,self.__dataclass_fields__,'financial run view')
         for name in ('execution_sha256','run_inventory_sha256','source_manifest_sha256',
                      'source_coverage_sha256','task_row_inventory_sha256','worker_inventory_sha256',
+                     'execution_inventory_sha256','parent_receipt_inventory_sha256',
                      'controller_settlement_inventory_sha256'):
             sha(values[name])
         nullable(values['native_terminal_sha256'],sha)

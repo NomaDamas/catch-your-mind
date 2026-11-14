@@ -21,11 +21,15 @@ def incomplete_collection(store,count=24):
     c=dict(runtime_policy_sha256=digest(u),arms=[dict(arm=a,provider_bindings=[]) for a in 'ABC'])
     q=dict(schema_version=2,recording_reconciliation_sha256=digest(e),stream_protocol_sha256=digest(k),collection_sha256=digest(c))
     i=dict(schema_version=3,scope_protocol_sha256=digest(q),collection_sha256=digest(c))
+    _,_,_,original_receipts=quality_fixture()
     sources=[];evidences=[];entries=[];lanes=[];runs=[];lives=[];coverages=[]
     for n,stream in enumerate(k['streams']):
         sid=stream['stream_id'];coverage=dict(stream_id=sid,actual_source_complete=False)
         covref=store.write('ledger/coverage-%03d.json'%n,coverage);coverages.append(covref)
-        run=runview(stream['arm'],invocation_ordinal=n,stream_id=sid,recording_id=stream['recording_id'],
+        nonce=digest(['original failed invocation',n])
+        receipts=[] if n>=len(original_receipts) else [{**original_receipts[n][1],'execution_sha256':nonce}]
+        run=runview(stream['arm'],execution_sha256=nonce,parent_receipt_inventory_sha256=digest(receipts),
+            invocation_ordinal=n,stream_id=sid,recording_id=stream['recording_id'],
             source_manifest_sha256=stream['source_manifest_sha256'],source_coverage_sha256=digest(coverage),
             source_comparable=False,operational_closed=False,external_work_closed=False,
             native_terminal_sha256=None,violations=('missing_native_prefix',))
@@ -89,6 +93,9 @@ class WholeLifetime(unittest.TestCase):
                 self.assertTrue(all(t.full_monetary_atomic is None for t in validated.totals))
                 plan,_,assessment,receipts=quality_fixture()
                 assessment.update(runtime_policy_sha256=digest(args['runtime']),collection_sha256=digest(args['collection']))
+                for row,(_,receipt),run in zip(assessment['rows'],receipts,args['observed_runs']):
+                    receipt['execution_sha256']=run.execution_sha256
+                    row['parent_receipt_sha256']=digest(receipt)
                 quality=compare_quality_latency(plan,assessment,receipts,expected_assessment_sha256=plan_digest(assessment))
                 report=reconcile_exposure(plan,args['exposure'],args['recordings'],validated,quality,
                     runtime_policy_sha256=digest(args['runtime']),collection_sha256=digest(args['collection']),

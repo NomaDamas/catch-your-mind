@@ -26,15 +26,17 @@ class ValidatedQualityLatency:
     runtime_policy_sha256: str
     collection_sha256: str
     execution_inventory_sha256: str
+    execution_receipts: tuple
 
     def __init__(self,plan_sha256,assessment_sha256,reports,*,runtime_policy_sha256,
-                 collection_sha256,execution_inventory_sha256,_issuer=None):
+                 collection_sha256,execution_inventory_sha256,execution_receipts,_issuer=None):
         if _issuer is not _QUALITY_ISSUER: raise TypeError('validated original quality/latency report required')
         object.__setattr__(self,'comparison_plan_sha256',plan_sha256)
         object.__setattr__(self,'assessment_sha256',assessment_sha256)
         object.__setattr__(self,'runtime_policy_sha256',runtime_policy_sha256)
         object.__setattr__(self,'collection_sha256',collection_sha256)
         object.__setattr__(self,'execution_inventory_sha256',execution_inventory_sha256)
+        object.__setattr__(self,'execution_receipts',execution_receipts)
         # Keep immutable canonical bytes, not mutable caller dictionaries.
         object.__setattr__(self,'reports',encode(reports,16*1024**2))
         object.__setattr__(self,'report_sha256',hashlib.sha256(self.reports).hexdigest())
@@ -71,7 +73,7 @@ def _compare_quality_latency(plan,assessment,receipts,*,expected_assessment_sha2
     tasks = plan['comparison']['tasks']; taskmap = {t['id']:t for t in tasks}
     if len(assessment['rows']) != 3*len(tasks) or type(receipts) is not list or len(receipts) != len(assessment['rows']):
         raise ValueError('all original task/arm rows and parent receipts required')
-    paired = {}
+    paired = {}; receipt_groups = {}
     for row,pair in zip(assessment['rows'],receipts):
         keys(row,('task_id','input_sha256','invocation_ordinal','parent_receipt_sha256','answer_sha256',
                   'quality_score','correct_critical_facts'),'original scored task')
@@ -101,7 +103,9 @@ def _compare_quality_latency(plan,assessment,receipts,*,expected_assessment_sha2
         if row['input_sha256'] != taskmap[tid]['input_sha256'] or receipt['task_id'] != tid or receipt['input_sha256'] != row['input_sha256']:
             raise ValueError('assessment changed original task/input')
         if row['parent_receipt_sha256'] != digest(receipt): raise ValueError('assessment parent receipt binding differs')
-        integer(row['invocation_ordinal'],maximum=95)
+        invocation = integer(row['invocation_ordinal'],maximum=95)
+        identity = (invocation,arm,receipt['execution_sha256'])
+        receipt_groups.setdefault(identity,[]).append(dict(receipt))
         latency = integer(receipt['latency_ns'],1)
         quality = row['quality_score']
         if type(quality) not in (int,float) or not math.isfinite(quality) or not 0 <= quality <= 1:
@@ -136,7 +140,9 @@ def _compare_quality_latency(plan,assessment,receipts,*,expected_assessment_sha2
             gates=gates,meets_quality_latency_gates=all(gates.values()),missing_critical_facts=missing)
     return ValidatedQualityLatency(plan_digest(plan),expected_assessment_sha256,result,
         runtime_policy_sha256=assessment['runtime_policy_sha256'],collection_sha256=assessment['collection_sha256'],
-        execution_inventory_sha256=assessment['execution_inventory_sha256'],_issuer=_QUALITY_ISSUER)
+        execution_inventory_sha256=assessment['execution_inventory_sha256'],
+        execution_receipts=tuple(sorted((*identity,digest(sorted(group,key=lambda r:r['task_id'])))
+            for identity,group in receipt_groups.items())),_issuer=_QUALITY_ISSUER)
 
 
 def reconcile_exposure(plan,exposure,recordings,ledger,quality_latency,*,runtime_policy_sha256,
@@ -151,6 +157,13 @@ def reconcile_exposure(plan,exposure,recordings,ledger,quality_latency,*,runtime
     if allocation_sha256 is not None: raise ValueError('allocation adapter not yet reviewed for lifetime2; cannot accept an old allocation')
     for value in (runtime_policy_sha256,collection_sha256,scope_protocol_sha256,
                   instrumentation_protocol_sha256,execution_inventory_sha256): sha(value)
+    for name,value in (('runtime_policy_sha256',runtime_policy_sha256),('collection_sha256',collection_sha256),
+            ('scope_protocol_sha256',scope_protocol_sha256),('instrumentation_protocol_sha256',instrumentation_protocol_sha256),
+            ('execution_inventory_sha256',execution_inventory_sha256)):
+        if getattr(ledger,name) != value: raise ValueError('reconciliation crosses original validated ledger '+name)
+    expected_receipts = tuple(row for row in ledger.execution_receipts if row[3] != digest([]))
+    if quality_latency.execution_receipts != expected_receipts:
+        raise ValueError('quality receipts cross original validated execution/parent receipt inventory')
     if (quality_latency.runtime_policy_sha256 != runtime_policy_sha256 or
             quality_latency.collection_sha256 != collection_sha256 or
             quality_latency.execution_inventory_sha256 != execution_inventory_sha256):

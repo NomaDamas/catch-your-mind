@@ -123,7 +123,7 @@ The complete runtime validator issues frozen `FinancialRunView` through its
 internal issuer. This is not a JSON deserializer or a generic success attestation.
 Its exact fields are:
 
-`execution_sha256:H,run_inventory_sha256:H,invocation_ordinal:0..95,stream_id:ID,recording_id:ID,arm:ABC,source_manifest_sha256:H,source_coverage_sha256:H,source_comparable:bool,task_row_inventory_sha256:H,clock_domain:ID,clock_consistent:bool,activation_started_ns:N,child_spawn_started_ns:N|null,playback_anchor_ns:N|null,source_finished_ns:N|null,child_cleanup_finished_ns:N|null,process_reaped_ns:N|null,parent_resources_closed_ns:N|null,operational_closed:bool,external_work_closed:bool,worker_inventory_sha256:H,native_terminal_sha256:H|null,controller_settlement_inventory_sha256:H,semantic_unknown_instances:tuple[H],violations:tuple[enum]`.
+`execution_sha256:H,run_inventory_sha256:H,execution_inventory_sha256:H,parent_receipt_inventory_sha256:H,invocation_ordinal:0..95,stream_id:ID,recording_id:ID,arm:ABC,source_manifest_sha256:H,source_coverage_sha256:H,source_comparable:bool,task_row_inventory_sha256:H,clock_domain:ID,clock_consistent:bool,activation_started_ns:N,child_spawn_started_ns:N|null,playback_anchor_ns:N|null,source_finished_ns:N|null,child_cleanup_finished_ns:N|null,process_reaped_ns:N|null,parent_resources_closed_ns:N|null,operational_closed:bool,external_work_closed:bool,worker_inventory_sha256:H,native_terminal_sha256:H|null,controller_settlement_inventory_sha256:H,semantic_unknown_instances:tuple[H],violations:tuple[enum]`.
 
 Only activation_started_ns is mandatory among lifecycle times; every unknown
 actual milestone remains null. A failed run still gets its typed view after
@@ -249,3 +249,27 @@ actual native global entry_ordinal. It is never model-reported or inferred by
 clock. The reader independently reconstructs its exact per-binding rank from
 the complete native sequence and rejects any mismatch. Ordinary bind_entry
 without that argument preserves contiguous observed binding behavior.
+
+
+## Review corrections: immutable reconciliation and operation meters
+
+The nonwire runtime-issued view additionally retains the validated original
+collection execution-inventory object digest and the canonical digest of all
+actual parent receipts for this invocation sorted by task_id. An empty receipt
+inventory means an actually empty original task inventory, never missing receipt
+publication; missing expected tasks retain explicit failed/not_executed receipts.
+The ledger preserves its validated U/C/Q/I identities, execution inventory digest,
+all original run/native/task/controller inventory identities, and per-invocation
+(ordinal, arm, execution, parent-receipt inventory) tuples. Reconciliation compares
+all of these original execution/receipt tuples with the quality validator's actual
+receipt tuples, as well as all caller/assessment digests with the immutable ledger
+identities. A new assessment or caller-supplied hash cannot retarget old costs.
+
+A nonsemantic operation's meter_lane must belong to its original stream and an
+explicit frozen monetary interval lane with observed_lifecycle coverage. That
+lane's lifecycle_binding_id must resolve the actual operation binding in its
+original arm, and actual native work with that binding and parent_entry_ordinal
+must be retained inside the fully measured interval. Missing/open actual work
+keeps costs incomplete; a cross-run/resource binding or excluded interval is
+rejected. Whole-lifetime overhead and event meters remain valid cost components
+but cannot assert that an otherwise unpriced operation has been settled.

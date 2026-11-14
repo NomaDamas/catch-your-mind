@@ -173,11 +173,20 @@ class ValidatedLifetimeLedger:
     policy_sha256: str
     exposure_sha256: str
     ledger_sha256: str
+    runtime_policy_sha256: str
+    collection_sha256: str
+    scope_protocol_sha256: str
+    instrumentation_protocol_sha256: str
+    execution_inventory_sha256: str
+    execution_receipts: tuple
+    run_inventory: tuple
     totals: tuple
     evidence_class: str
     validity: object
 
-    def __init__(self,*,policy_sha256,exposure_sha256,ledger_sha256,totals,evidence_class,validity,_issuer=None):
+    def __init__(self,*,policy_sha256,exposure_sha256,ledger_sha256,runtime_policy_sha256,collection_sha256,
+                 scope_protocol_sha256,instrumentation_protocol_sha256,execution_inventory_sha256,
+                 execution_receipts,run_inventory,totals,evidence_class,validity,_issuer=None):
         if _issuer is not _TOTAL_ISSUER: raise TypeError('validated full lifetime ledger required')
         validity = MappingProxyType(dict(validity))
         for name,value in locals().copy().items():
@@ -317,6 +326,8 @@ def _financial_inventory(store,value,*,adapters,policy,exposure,collection_sha25
                 raise ValueError('meter lane cannot conceal semantic controller liability')
             keys(row['meter_lane'],('stream_id','component_id','resource_id','lane_id'),'operation meter lane')
             for item in row['meter_lane'].values(): identifier(item)
+            if row['meter_lane']['stream_id'] != runmap[row['invocation_ordinal']].stream_id:
+                raise ValueError('operation meter crosses original run stream')
         financial_operations[instance] = row
         store.reserve_index(row)
     if set(financial_operations) != set(operations): raise ValueError('omitted failed/cancelled/discarded native operation')
@@ -360,6 +371,10 @@ def _validate_costs(store,page_refs,*,policy,runs,lifetimes,financial,operations
     totals = {sid:0 for sid in streams}; reasons = {sid:set() for sid in streams}
     lines = {}; claims = set(); identities = set(); measured = {}; operation_lines = {}; work_lines = {}
     locator_positions = {}; lane_positions = {}; component_entries = {}; stream_entries = {}
+    operation_work = {}
+    for (invocation,_,_),interval in work.items():
+        if interval['parent_entry_ordinal'] is not None:
+            operation_work.setdefault((invocation,interval['binding'],interval['parent_entry_ordinal']),[]).append(interval)
     previous = None; entries = 0
     for ordinal,ref in enumerate(array(page_refs,1024)):
         if reference(ref)['path'] != 'ledger/cost-%06d.json'%ordinal: raise ValueError('fixed contiguous cost page path required')
@@ -539,7 +554,27 @@ def _validate_costs(store,page_refs,*,policy,runs,lifetimes,financial,operations
             if len(operation_lines.get(instance,[])) != 1: raise ValueError('each original percall line requires exactly one cost owner')
         elif row['basis'] == 'meter_lane':
             key = tuple(row['meter_lane'][k] for k in ('stream_id','component_id','resource_id','lane_id'))
-            if key not in financial['lanes'] or financial['lanes'][key]['status'] != 'closed': reasons[sid].add('unclosed_operation_meter')
+            if key[0] != sid: raise ValueError('operation meter crosses original run stream')
+            requirement = streams[sid]['requirements'].get(key[1])
+            lane = next((lane for lane in requirement['lanes'] if
+                (lane['resource_id'],lane['lane_id']) == key[2:]),None) if requirement is not None else None
+            if (lane is None or requirement['state'] != 'required' or components[key[1]]['kind'] != 'monetary' or
+                    components[key[1]]['coverage'] != 'interval' or lane['coverage'] != 'observed_lifecycle'):
+                raise ValueError('operation meter requires an explicit monetary lifecycle binding, not overhead or event coverage')
+            if collection is None: raise ValueError('operation meter requires frozen provider bindings')
+            bindings = next(a['provider_bindings'] for a in collection['arms'] if a['arm'] == runordinal[operation['invocation_ordinal']].arm)
+            matching = [i for i,b in enumerate(bindings) if b['binding_id'] == lane['lifecycle_binding_id']]
+            if matching != [operation['binding_index']]: raise ValueError('operation meter crosses frozen provider binding/resource')
+            declared = financial['lanes'].get(key)
+            if declared is None: raise ValueError('operation meter requires its original financial resource lane')
+            selected = operation_work.get((operation['invocation_ordinal'],operation['binding_index'],operation['entry_ordinal']),())
+            if not selected: reasons[sid].add('unmeasured_operation_work')
+            for interval in selected:
+                if interval['clock_domain'] != 'host_monotonic_ns' or interval['ended_ns'] is None:
+                    reasons[sid].add('unclosed_operation_work')
+                elif not declared['window_start_ns'] <= interval['started_ns'] <= interval['ended_ns'] <= declared['window_end_ns']:
+                    raise ValueError('operation meter excludes actual operation work interval')
+            if declared['status'] != 'closed': reasons[sid].add('unclosed_operation_meter')
             if operation_lines.get(instance): raise ValueError('original call cannot be billed by meter AND percall line')
     return totals,reasons,lines
 
@@ -589,6 +624,10 @@ def validate_lifetime_ledger(policy,exposure,runtime,collection,scope_protocol,i
     runs = tuple(observed_runs)
     if not 3 <= len(runs) <= 96 or any(type(run) is not FinancialRunView for run in runs):
         raise TypeError('all original typed runtime arm joins required')
+    if len({r.invocation_ordinal for r in runs}) != len(runs) or len({r.execution_sha256 for r in runs}) != len(runs):
+        raise ValueError('all original invocation and execution identities must be unique')
+    execution_inventories = {r.execution_inventory_sha256 for r in runs}
+    if len(execution_inventories) != 1: raise ValueError('all original runs must bind the same actual execution inventory')
     runmap = {r.stream_id:r for r in runs}; streams = {s['stream_id']:s for s in policy['streams']}
     if len(runmap) != len(runs) or set(runmap) != set(streams): raise ValueError('every frozen original arm run required once')
     for run in runs:
@@ -706,4 +745,10 @@ def validate_lifetime_ledger(policy,exposure,runtime,collection,scope_protocol,i
         result.append(ArmLifetimeTotal(run,lifetime_hashes[sid],closure_map[sid],stream['exposure_duration_ns'],elapsed,
             totals[sid],None if reasons[sid] else totals[sid],tuple(sorted(reasons[sid]))))
     return ValidatedLifetimeLedger(policy_sha256=expected_policy_sha256,exposure_sha256=expected_exposure_sha256,
-        ledger_sha256=expected_ledger_sha256,totals=tuple(result),evidence_class='fixture',validity=validity,_issuer=_TOTAL_ISSUER)
+        ledger_sha256=expected_ledger_sha256,runtime_policy_sha256=plan_digest(runtime),collection_sha256=digest(collection),
+        scope_protocol_sha256=digest(scope_protocol),instrumentation_protocol_sha256=digest(instrumentation),
+        execution_inventory_sha256=next(iter(execution_inventories)),
+        execution_receipts=tuple(sorted((r.invocation_ordinal,r.arm,r.execution_sha256,r.parent_receipt_inventory_sha256) for r in runs)),
+        run_inventory=tuple(sorted((r.invocation_ordinal,r.execution_sha256,r.stream_id,r.run_inventory_sha256,
+            r.task_row_inventory_sha256,r.native_terminal_sha256,r.controller_settlement_inventory_sha256) for r in runs)),
+        totals=tuple(result),evidence_class='fixture',validity=validity,_issuer=_TOTAL_ISSUER)

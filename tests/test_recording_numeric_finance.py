@@ -6,6 +6,7 @@ no real camera, invoice authority, model weights or backend entry is claimed.
 """
 import asyncio
 import dataclasses
+import copy
 import hashlib
 from pathlib import Path
 import tempfile
@@ -95,6 +96,8 @@ async def complete_collection(root,store):
         receipt=dict(schema_version=1,kind='recording_parent_task_receipt',execution_sha256=nonce,task_id=task['task_id'],
             input_sha256=task['input_sha256'],result_sha256=digest(result),received_ns=received,failed_observed_ns=None,status='answer',
             failure_reason='completed',answer_sha256=digest(result['text']),latency_ns=100000000 if inv['arm']=='A' else 70000000)
+        runs[-1]=_issue_financial_run_view(**{**dataclasses.asdict(run),
+            'parent_receipt_inventory_sha256':digest([receipt])})
         receipts.append((inv['arm'],receipt));assessment_rows.append(dict(task_id=task['task_id'],input_sha256=task['input_sha256'],
             invocation_ordinal=ordinal,parent_receipt_sha256=digest(receipt),answer_sha256=receipt['answer_sha256'],quality_score=1,
             correct_critical_facts=p['comparison']['tasks'][inv['recording_index']]['critical_facts']))
@@ -160,6 +163,28 @@ class ActualNumericFinance(unittest.IsolatedAsyncioTestCase):
                 # Original synthetic-P measured/heldout gate is preserved.
                 self.assertFalse(report['comparison']['B_vs_A']['overall_gate']);self.assertFalse(report['comparison']['C_vs_A']['overall_gate'])
                 self.assertEqual(report['evidence_class'],'fixture');self.assertFalse(report['truth_flags']['receipt_authenticity_verified'])
+                # Caller strings and a newly reviewed assessment cannot retarget
+                # a validated monetary ledger to another runtime or receipt set.
+                original=dict(runtime_policy_sha256=upstream_digest(args['runtime']),collection_sha256=upstream_digest(args['collection']),
+                    scope_protocol_sha256=upstream_digest(args['scope_protocol']),instrumentation_protocol_sha256=upstream_digest(args['instrumentation']),
+                    execution_inventory_sha256='c'*64)
+                for field in original:
+                    changed=dict(original);changed[field]='9'*64
+                    forged=copy.deepcopy(assessment)
+                    if field in forged:forged[field]=changed[field]
+                    alternate=compare_quality_latency(args['plan'],forged,receipts,expected_assessment_sha256=plan_digest(forged))
+                    with self.subTest(crossed=field),self.assertRaisesRegex(ValueError,'original validated ledger'):
+                        reconcile_exposure(args['plan'],args['exposure'],args['recordings'],validated,alternate,**changed)
+                for mutation in ('execution','receipt','invocation'):
+                    forged=copy.deepcopy(assessment);foreign=copy.deepcopy(receipts)
+                    if mutation=='execution':foreign[0][1]['execution_sha256']='9'*64
+                    elif mutation=='receipt':foreign[0][1]['received_ns']+=1
+                    else:forged['rows'][0]['invocation_ordinal']=1
+                    forged['rows'][0]['parent_receipt_sha256']=digest(foreign[0][1])
+                    alternate=compare_quality_latency(args['plan'],forged,foreign,expected_assessment_sha256=plan_digest(forged))
+                    with self.subTest(crossed=mutation),self.assertRaisesRegex(ValueError,'execution/parent receipt inventory'):
+                        reconcile_exposure(args['plan'],args['exposure'],args['recordings'],validated,alternate,**original)
+
             # A syntactically valid attachment cannot replace the actual SDK inventory.
             values=dataclasses.asdict(args['observed_runs'][0]);values['controller_settlement_inventory_sha256']='a'*64
             args['observed_runs']=[_issue_financial_run_view(**values),*args['observed_runs'][1:]]

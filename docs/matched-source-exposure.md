@@ -18,7 +18,9 @@ current validity checkpoint. `reconcile_exposure` joins that typed ledger with
 The runtime must first validate every original receipt, task, source and answer
 lineage before supplying the quality helper; a hash is not independent evidence
 that a latency or assessment is true. Assessment runtime/collection/execution
-identities are checked again at reconciliation.
+identities are checked again against the immutable ledger at reconciliation,
+including the complete original execution set and each invocation's actual
+parent-receipt inventory. An unrelated reviewed assessment cannot retarget costs.
 
 `FinancialFixtureReceiptRouter` is an explicit owned bridge for
 `FixtureCompletion`. Register the actual pending request and decision hash
