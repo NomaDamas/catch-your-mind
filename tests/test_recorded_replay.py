@@ -146,15 +146,29 @@ class ReplaySDKTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory(dir='.') as directory:
             root=Path(directory).resolve();manifest,tasks,profiles=self.inputs(root)
             output=root/'cancelled'
-            job=asyncio.create_task(run_source_context_recording(manifest,tasks,profiles,output,
-                asset_directory=root,retain_evaluation_artifacts=True,max_lateness_ns=1000000000))
-            await asyncio.sleep(.08)
-            job.cancel()
-            with self.assertRaises(asyncio.CancelledError):await job
+            entered=asyncio.Event();release=asyncio.Event()
+            original_read=RecordedSourceReplay._read
+            async def held_read(replay,record):
+                # Preflight reads this shared payload only at sequence zero.
+                # Sequence one proves artifacts and the first capture are owned.
+                if record['sequence']==1:
+                    entered.set();await release.wait()
+                return await original_read(replay,record)
+            with patch.object(RecordedSourceReplay,'_read',held_read):
+                job=asyncio.create_task(run_source_context_recording(manifest,tasks,profiles,output,
+                    asset_directory=root,retain_evaluation_artifacts=True,max_lateness_ns=1000000000))
+                try:
+                    await asyncio.wait_for(entered.wait(),5)
+                    job.cancel()
+                    with self.assertRaises(asyncio.CancelledError):await job
+                finally:
+                    if not job.done():job.cancel()
+                    await asyncio.gather(job,return_exceptions=True)
             terminal=json.loads((output/'terminal.json').read_text())
             self.assertEqual(terminal['state'],'failed')
             self.assertEqual(terminal['summary']['failure_category'],'CancelledError')
-            self.assertGreater(terminal['summary']['sources']['mic']['uninspected_suffix'],0)
+            self.assertEqual(terminal['summary']['sources']['mic']['attempted'],1)
+            self.assertEqual(terminal['summary']['sources']['mic']['uninspected_suffix'],4)
             self.assertTrue(terminal['cleanup_finished'])
 
     async def test_wall_jump_aborts_without_reanchoring_or_relabeling_capture(self):
