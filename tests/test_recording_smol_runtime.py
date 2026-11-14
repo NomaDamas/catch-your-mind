@@ -63,7 +63,7 @@ class Admission(unittest.TestCase):
     def test_actual_hashes_retained_fds_and_mutation_detection(self):
         _,_,python,pins=self.admit()
         try:
-            self.assertEqual(python,sys.executable)
+            self.assertEqual(python,str(Path(sys.executable).resolve()))
             self.assertEqual(len(pins.files),3)
             self.assertTrue(all(not os.get_inheritable(fd) for fd,_,_ in pins.files))
             (self.root/'weights.bin').write_bytes(b'changed')
@@ -87,6 +87,14 @@ class Admission(unittest.TestCase):
         with self.assertRaises(ValueError):self.admit()
         weights.unlink();weights.symlink_to(saved)
         with self.assertRaises(OSError):self.admit()
+
+    def test_symlink_dependent_virtualenv_is_not_silently_reselected(self):
+        alias=self.root/'current-python';alias.symlink_to(Path(sys.executable).resolve())
+        with patch.object(sys,'executable',str(alias)),patch.object(sys,'prefix',str(self.root/'venv')):
+            a,assets,docs,inventory,_,_=self.case
+            assets=deepcopy(assets);assets['assets'][0]['path']=str(alias)
+            with self.assertRaisesRegex(ValueError,'virtual environment'):
+                smol._admit(a,assets,docs,inventory,'smolvlm_sentinel_v1')
 
 
 @unittest.skipIf(calls.np is None,'existing optional numpy required')
@@ -160,3 +168,32 @@ class OwnedWorker(NativeFixture,unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(asyncio.CancelledError):await task
                 self.assertIsNotNone(self.children[-1].returncode)
                 self.assertEqual(captured[0].files,[])
+
+    async def test_alias_retarget_never_executes_unverified_marker(self):
+        # No spawn/SDK mock: the real worker rejects our synthetic non-model
+        # assets. A substituted executable must never run, even on failure.
+        temporary=tempfile.TemporaryDirectory(dir='.');self.addCleanup(temporary.cleanup)
+        root=Path(temporary.name).resolve();real=Path(sys.executable).resolve()
+        alias=root/'current-python';alias.symlink_to(real)
+        marker=root/'UNVERIFIED_EXECUTED';replacement=root/'replacement-python'
+        replacement.write_text('#!'+str(real)+'\nfrom pathlib import Path\nPath('+repr(str(marker))+').write_text("executed")\n')
+        replacement.chmod(0o700)
+        with patch.object(sys,'executable',str(alias)):
+            a,assets,docs,inventory,config,spec=fixture(root)
+            owner,writer,_=await self.recording(provider=spec.provider,revision=spec.version,
+                role='small_vlm',boundary='process_adapter',config=dict(config,window_frames=1))
+            human,controller,_=self.setup_human();original=smol._admit;captured=[]
+            def retarget(*args):
+                result=original(*args);captured.append(result[3])
+                alias.unlink();alias.symlink_to(replacement)
+                return result
+            async with human:
+                owner.bind_semantic_lane(controller,0)
+                with patch.object(smol,'_admit',side_effect=retarget):
+                    with self.assertRaises((RuntimeError,ValueError,asyncio.TimeoutError)):
+                        await smol.open_smol_lane(human,'calls',a,assets,docs,owner,0,inventory,
+                            scheduler='smolvlm_sentinel_v1')
+            self.assertFalse(marker.exists())
+            self.assertEqual(captured[0].files,[])
+            await owner.close()
+            self.assertEqual(self.terminal(writer)['unclosed_workers'],0)

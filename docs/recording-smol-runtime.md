@@ -19,8 +19,12 @@ dependency, tokenizer or model installation is performed.
 
 Asset hashing uses bounded, nonblocking, no-follow regular-file descriptors.
 The verified checkpoint, tokenizer and interpreter descriptors remain owned until
-worker cleanup completes. The current interpreter's trusted symlink is resolved
-for byte verification without changing the environment path used to spawn.
+worker cleanup completes. The current interpreter’s alias is resolved for verification, and the exact
+verified canonical target is also used for spawning. Retargeting the alias
+after admission cannot select a different executable. A symlink-dependent
+virtual environment is refused because canonical execution could select its
+base environment; the initial profile supports base environments and current
+virtual environments whose executable path is already canonical.
 Configuration is detached before asynchronous admission. Cancellation joins the
 asset-read thread, or the actual SDK worker's shutdown and reap, before releasing
 those descriptors. Missing assets or unsupported dependencies fail explicitly.
@@ -39,5 +43,7 @@ this is not the HTTP PNG capture-correlation interface.
 Tests use tiny explicitly synthetic asset/installation metadata and an owned
 subprocess with a fixture predictor. They cover actual SDK admission, execution,
 publication, original native entry lookup, cancellation and process reaping, plus
-asset mutation/FIFO/symlink rejection. They do not establish trained Smol
+asset mutation/FIFO/symlink rejection and an actual-spawn alias-retarget
+regression. The latter uses non-model assets that the real worker rejects and
+checks that an unverified executable marker never runs. They do not establish trained Smol
 accuracy, model installation, sustained realtime performance or cost savings.

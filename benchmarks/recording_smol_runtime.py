@@ -96,6 +96,8 @@ def _admit(adapter,assets,documents,dependencies,scheduler):
     if Path(python['path']).absolute()!=actual:
         raise ValueError('separate Python environment has no verified dependency inventory')
     resolved=actual.resolve(strict=True)
+    if sys.prefix!=sys.base_prefix and actual!=resolved:
+        raise ValueError('symlink-dependent virtual environment cannot use a canonical worker launch')
     if not os.access(actual,os.X_OK):raise ValueError('existing executable Python required')
     pins=_Pins()
     try:
@@ -109,7 +111,9 @@ def _admit(adapter,assets,documents,dependencies,scheduler):
         if (adapter['provider'],adapter['model_revision'])!=(spec.provider,spec.version):
             raise ValueError('actual Smol provider/revision differs from frozen adapter')
         pins.check()
-        return adapter,config,str(actual),pins
+        # Launch the exact no-follow target that was verified and retained, not
+        # the alias whose resolution could change after admission.
+        return adapter,config,str(resolved),pins
     except BaseException:
         pins.close();raise
 
