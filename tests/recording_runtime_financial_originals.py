@@ -81,14 +81,25 @@ def financial_originals(joined,manifest,documents,output,store):
             assessments.append(dict(task_id=receipt['task_id'],input_sha256=receipt['input_sha256'],invocation_ordinal=inv,
                 parent_receipt_sha256=digest(receipt),answer_sha256=receipt['answer_sha256'],quality_score=1,
                 correct_critical_facts=task['critical_facts']))
-    costrefs=[];previous=None
-    for ordinal,start in enumerate(range(0,len(costs),128)):
-        page=dict(schema_version=2,kind='recording_cost_lines',page_ordinal=ordinal,previous_page_sha256=previous,entries=costs[start:start+128])
+    # Native identities make actual runtime rows larger than small arithmetic
+    # fixtures. Keep pages within the original64KiB bound as well as128 rows.
+    from benchmarks.recording_financial import encode
+    pages=[];pending=[]
+    for row in costs:
+        if pending and (len(pending)==128 or len(encode(dict(schema_version=2,kind='recording_cost_lines',
+                page_ordinal=len(pages),previous_page_sha256='0'*64,entries=[*pending,row]),maximum=1024**2,newline=True))>65536):
+            pages.append(pending);pending=[]
+        pending.append(row)
+    if pending:pages.append(pending)
+    costrefs=[];locators=[];previous=None
+    for ordinal,rows in enumerate(pages):
+        page=dict(schema_version=2,kind='recording_cost_lines',page_ordinal=ordinal,previous_page_sha256=previous,entries=rows)
         ref=store.write(f'ledger/cost-{ordinal:06}.json',page);costrefs.append(ref);previous=ref['file_sha256']
+        locators.extend(dict(cost_page=ref,entry_index=n) for n in range(len(rows)))
     for run,localops,localdocs,positions in perrun:
         lane=dict(stream_id=run.stream_id,component_id='perception',resource_id='r-'+str(run.invocation_ordinal),lane_id='perception',
             window_start_ns=run.activation_started_ns,window_end_ns=run.parent_resources_closed_ns,status='closed',
-            cost_line_inventory=store.write_index('line-locators',[dict(cost_page=costrefs[pos//128],entry_index=pos%128) for pos in positions]),
+            cost_line_inventory=store.write_index('line-locators',[locators[pos] for pos in positions]),
             work_inventory_sha256=run.worker_inventory_sha256)
         lanes.append(lane)
         finality=dict(schema_version=1,kind='synthetic_recording_finality',evidence_class='fixture',authority='gamst.synthetic_invoice_fixture_v1',
