@@ -1,17 +1,22 @@
 # Third-party source and model policy
 
+For the approved expansion, use the current
+[candidate execution/runtime/license matrix](candidate-execution-matrix.md).
+The installation history below does not establish which assets are currently
+present or validate an alternative model. Actual experiments and model/sensor
+validation are deferred by the user's 2026-11-15 direction.
+
 This checkout contains original integration code. Model weights are downloaded
 separately into the ignored project-owned `.local-models` directory and are not
 included in GitHub source or Python wheels. Optional dependencies retain their
 own licenses. A code license and a model-weight license are separate obligations.
 
-Network access is available in the current host environment: official model
-artifacts have been downloaded, upstream documentation consulted, and repository
-changes pushed. Earlier documentation saying no remote access was possible
-referred to a previous sandbox. No inspected or reused REA implementation is
-claimed here.
+Earlier development downloaded official model artifacts, consulted upstream
+documentation and pushed repository changes. That history does not establish
+current network access or locally installed assets. No inspected or reused REA
+implementation is claimed here.
 
-## Installed integrations and artifact provenance
+## Historical integrations and artifact provenance
 
 - **OpenCV:** built-in HOG person detector, normalized boxes and local IoU tracking.
 - **MediaPipe Tasks:** explicit face-landmarker task file, landmarks and blendshapes.
@@ -35,12 +40,14 @@ loads MediaPipe code and its face-model asset from the documented external URLs.
 
 ## Extension boundaries
 
-SAM3, YOLO, Pipecat and LiveKit implementations are not vendored. SAM3's upstream
-segmentation/tracking capability has been reviewed, but a working SAM3 execution
-adapter, weights and local Mac performance are not validated. The existing plugin
-interface is an integration boundary, not proof that every external model is
-plug-and-play. The LiveKit/Pipecat decoded-media bridges likewise do not establish
-compatibility with every framework release.
+SAM3, YOLO, Pipecat and LiveKit implementations are not vendored. The
+[SAM3 sampled-image adapter](sam3.md) and [YOLOE native adapter](yoloe-context.md)
+now exist; neither establishes support for SAM3.1 video tracking, YOLO26n or every
+YOLO checkpoint. Actual selected-model/device acceptance remains separately
+tracked in the matrix. The existing plugin interface is an integration boundary,
+not proof that every external model is plug-and-play. The LiveKit/Pipecat
+decoded-media bridges likewise do not establish compatibility with every
+framework release.
 
 Hugging Face and Ollama interfaces and Pipecat pipeline concepts are credited in
 [streaming architecture](streaming-and-plugins.md). These are protocol and design
