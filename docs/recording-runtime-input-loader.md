@@ -73,3 +73,31 @@ references in `execution-inventory.json`. A structural result does not establish
 numerical eligibility. The matched-source evaluator additionally needs all
 original validated runs, financial evidence and separately reviewed assessments;
 missing receipts and failed runs cannot be dropped to obtain a passing result.
+
+The Python API requires the same explicit retention consent as the command.
+It returns `validated_runs` as an immutable tuple of issued runtime joins and
+`artifact_budget` as the collection's shared lifetime budget. Keep these objects
+in the owning process when using the prospective U2 financial bridge; JSON
+copies of a run inventory cannot replace an issued native/runtime join.
+
+```python
+result = await run_recording_collection(
+    input_root, new_output_root,
+    expected_execution_sha256=original_execution_zero_sha256,
+    retain_evaluation_artifacts=True,
+    retain_financial_documents=True,  # Must match the frozen U2 scope policy.
+)
+views = finalize_financial_runs(
+    result['validated_runs'], result['manifest'], documents=original_documents,
+)
+```
+
+Import the two functions from `benchmarks.recording_coordinator` and
+`benchmarks.recording_runtime_finance`. `original_documents` must be the same
+validated original input set, not reconstructed answers or revised policies.
+The views do not settle missing charges or establish finality.
+`reconcile_runtime_finance` additionally requires original financial artifacts,
+an explicit ledger, a reviewed validity checkpoint and the reviewed assessment.
+Financial artifact writes must use `result['artifact_budget']`; the source/runtime
+output budget is never reset for later reconciliation. U1 has no financial
+finalization path and remains structurally ineligible for numerical evaluation.
