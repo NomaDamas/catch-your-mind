@@ -146,9 +146,11 @@ inputs; process isolation is not an OS sandbox. No installer is run by this matr
     selected; [#17](https://github.com/NomaDamas/Gamst/issues/17),
     [#31](https://github.com/NomaDamas/Gamst/issues/31).
 18. **RANSAC/homography — partial algorithm coverage.** OpenCV RANSAC similarity
-    fitting in `BackgroundSimilarity` is implemented; arbitrary projective
-    homography is not. [Compensation](compensated-trajectories.md),
-    `test_camera_similarity`, `test_compensated_runtime`; `vision` extra, no
+    fitting in `BackgroundSimilarity` and explicitly supplied projective
+    homography projection in `geometry.ground_plane` are implemented. Arbitrary
+    homography estimation and verified calibration are not.
+    [Compensation](compensated-trajectories.md), [plane projection](ground-plane.md),
+    `test_camera_similarity`, `test_compensated_runtime`, `test_ground_plane`; `vision` extra, no
     weights, OpenCV terms above. [#134](https://github.com/NomaDamas/Gamst/issues/134).
 19. **CoTracker3 online — not integrated.** No pinned online state/runtime or
     checkpoint validation; code/weights unreviewed.

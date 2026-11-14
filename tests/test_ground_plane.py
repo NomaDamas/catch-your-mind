@@ -23,6 +23,15 @@ def frame():
 
 
 class Geometry(unittest.TestCase):
+    def test_projective_scale_equivalence_preserves_original_configuration(self):
+        for scale in (1, 1e-300, 1e-320, 5e-324, -5e-324):
+            with self.subTest(scale=scale):
+                config = dict(CONFIG, image_to_plane=[[scale,0,0],[0,scale,0],[0,0,scale]])
+                provider = GroundPlane(config)
+                self.assertEqual(provider.process(frame())['points'][0]['plane_xy_m'], [.5,.5])
+                self.assertEqual(provider.config, config)
+                self.assertEqual(provider.spec, GroundPlane.capability(config))
+
     def test_projective_division_plane_eligibility_and_region_abstention(self):
         p=GroundPlane(CONFIG);f=frame();value=p.process(f)
         self.assertEqual(value['points'][0]['plane_xy_m'],[4,8])

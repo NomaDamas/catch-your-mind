@@ -51,6 +51,8 @@ class GroundPlane:
     def __init__(self, config):
         self.config = configuration(config)
         self.spec = self.capability(self.config)
+        scale = max(abs(x) for row in self.config['image_to_plane'] for x in row)
+        self.matrix = [[x / scale for x in row] for row in self.config['image_to_plane']]
         self.closed = False
 
     def reset(self):
@@ -77,7 +79,7 @@ class GroundPlane:
             raise ValueError('bounded exact-reference image points required')
         if type(frame.timestamp_ms) is not int or not 0 <= frame.timestamp_ms <= 2**53-1:
             raise ValueError('original capture timestamp required')
-        points=[];ids=set();matrix=c['image_to_plane'];roi=c['valid_roi']
+        points=[];ids=set();matrix=self.matrix;roi=c['valid_roi']
         for point in value['points']:
             if type(point) is not dict or set(point) != {'id','xy','on_plane'}:
                 raise ValueError('point identity, normalized xy and explicit plane eligibility required')
