@@ -300,9 +300,9 @@ inputs; process isolation is not an OS sandbox. No installer is run by this matr
 51. **pyroomacoustics — reference only, not wrapped or required.** The DSP
     paths above are independent implementations. No package compatibility or
     license combination validated; [#27](https://github.com/NomaDamas/Gamst/issues/27).
-52. **WebRTC AEC/NS/AGC — AEC3 implemented; NS/AGC not integrated.**
+52. **WebRTC AEC/NS/AGC — implemented optional native pipeline bridge.**
     `webrtc.aec3`, `duplex` extra; [contract](duplex-audio.md), `test_duplex`.
-    The path uses EchoCanceller directly, not the combined NS/AGC pipeline.
+    AEC-only uses EchoCanceller; explicit NS/AGC options use AudioProcessor.
     Preserve the ambient lane. Wrapper Apache-2.0, WebRTC vendored notices separate, no
     learned weights. Native acoustic acceptance
     [#103](https://github.com/NomaDamas/Gamst/issues/103).

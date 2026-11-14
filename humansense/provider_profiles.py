@@ -85,7 +85,8 @@ def capability(profile, config):
         return OpenPIVFlow.capability(**config)
     if profile == 'webrtc.aec3':
         from .providers.duplex import WebRTCDuplex
-        if set(config)-{'sample_rate','stream_delay_ms','ambient_sensor_id','speech_sensor_id'}:
+        if set(config)-{'sample_rate','stream_delay_ms','ambient_sensor_id','speech_sensor_id',
+                       'noise_suppression','automatic_gain_control','ns_level','agc_gain_db','agc_max_gain_db'}:
             raise ValueError('unknown duplex profile option')
         return WebRTCDuplex.capability(**config)
     if profile == 'dinov3.regions':

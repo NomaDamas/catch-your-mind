@@ -32,7 +32,9 @@ def run(args):
     from importlib.metadata import version
     rate,near,near_hash=read_pcm(args.microphone);far_rate,far,far_hash=read_pcm(args.render)
     if rate!=far_rate or len(near)!=len(far):raise ValueError('paired captures must have identical rate/length')
-    start=time.perf_counter();provider=WebRTCDuplex.from_installed(sample_rate=rate,stream_delay_ms=args.delay_ms)
+    start=time.perf_counter();provider=WebRTCDuplex.from_installed(sample_rate=rate,stream_delay_ms=args.delay_ms,
+        noise_suppression=getattr(args,'noise_suppression',False),automatic_gain_control=getattr(args,'automatic_gain_control',False),
+        ns_level=getattr(args,'ns_level',1),agc_gain_db=getattr(args,'agc_gain_db',0.0),agc_max_gain_db=getattr(args,'agc_max_gain_db',50.0))
     report=dict(kind='paired_pcm_smoke_not_acoustic_acceptance',microphone_sha256=near_hash,render_sha256=far_hash,
         runtime=dict(python=platform.python_version(),platform=platform.platform(),binding=version('pywebrtc-audio'),numpy=version('numpy')),
         initialization_ms=(time.perf_counter()-start)*1000,sample_rate=rate,configured_delay_ms=args.delay_ms,
@@ -62,6 +64,11 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     for name in ('microphone','render','output'):parser.add_argument('--'+name,required=True)
     parser.add_argument('--delay-ms',type=int,default=0)
+    parser.add_argument('--noise-suppression',action='store_true')
+    parser.add_argument('--automatic-gain-control',action='store_true')
+    parser.add_argument('--ns-level',type=int,default=1)
+    parser.add_argument('--agc-gain-db',type=float,default=0.0)
+    parser.add_argument('--agc-max-gain-db',type=float,default=50.0)
     run(parser.parse_args())
 
 
