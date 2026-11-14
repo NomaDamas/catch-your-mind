@@ -316,6 +316,8 @@ class _Completion(BoundCompletion):
             raise TypeError('typed joint completion workspace reservation required')
         # Native context validation is reused; no user-authored current scope.
         from humansense.native_entry import validate_owner
+        from .recording_native_schema import snapshot
+        context = snapshot(context, maximum=4096)
         validate_owner('recording_native4', dict(context=context, scope_index=0, binding_index=binding_index))
         if context['invocation_ordinal'] != invocation_ordinal: raise ValueError('completion invocation mismatch')
         self._context = encoded(context); self.capacity = capacity; self._memory = memory

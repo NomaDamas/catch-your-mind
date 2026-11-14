@@ -344,6 +344,13 @@ class FixtureTests(NativeFixture,unittest.IsolatedAsyncioTestCase):
         client=await FixtureCompletion.open(spec,rows,invocation_ordinal=0,lane_id='text',binding_index=0,
             context=observer.context,capacity=TransportCapacity(262144),memory=memory)
         self.addAsyncCleanup(client.close)
+        self.assertEqual(json.loads(client._context), dict(observer.context))
+        with self.assertRaises(TypeError): observer.context['nonce']='b'*64
+        for context in (dict(observer.context,extra=True), dict(observer.context,nonce='b'*4097),
+                        dict(observer.context,invocation_ordinal=1)):
+            with self.subTest(context_keys=tuple(context)),self.assertRaises(ValueError):
+                await FixtureCompletion.open(spec,rows,invocation_ordinal=0,lane_id='text',binding_index=0,
+                    context=context,capacity=TransportCapacity(262144),memory=memory)
         observer.bind_semantic_lane(self.c,0);observer.bind_backend(0,client,'callback');observer.bind_mapping(clock.mapping,clock.sha256)
         adapter=TextContextCalls(self.h,'main',client,provider='test.client',model_revision='v1',evaluation_observer=observer)
         self.adapters.append(adapter);scope=observer.task_scope(observer.declarations['tasks'][0]['task_id'],0)
