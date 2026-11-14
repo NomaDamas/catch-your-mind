@@ -249,7 +249,10 @@ class RecordingTaskRuntime:
         try:
             self.human._check();now=self._now()
             if now>=self._deadline(n):reason='timeout';return
-            record=state['snapshot']['record'];wall=timestamp()
+            # Canonical detached order makes the actual SDK user-message bytes
+            # reproducible from the immutable retained original record. Values,
+            # record digest and capture freshness are unchanged.
+            record=json.loads(encoded(state['snapshot']['record']));wall=timestamp()
             if (wall-record['timestamp_ms']>min(1000,lane.controller._policy.max_age_ms) or wall<record['timestamp_ms']):reason='stale';return
             source=lane.controller.open_source(record,now_ms=wall)
             decision=lane.controller.submit_next(source,record,now_ms=wall,query=True,needs_visual=False)
