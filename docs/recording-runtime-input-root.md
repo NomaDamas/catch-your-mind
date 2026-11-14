@@ -39,7 +39,10 @@ The exact metadata inventory is:
 - `invocations/NN/execution.json` for the original C2 invocation ordinal NN
   (00..95), with no relabeling, omitted invocation, or additional row;
 - optional `runtime/accounting.json`, `runtime/opportunities.json`,
-  `runtime/exposure.json` exactly when U2 requires K2/G/E2. U1 rejects these;
+  `runtime/exposure.json`, `runtime/financial-adapters.json` exactly when U2
+  requires K2/G/E2/F1. The latter is the exact approved financial-adapter
+  inventory, <=64KiB, with canonical object hash equal to BOTH E2 and K2
+  financial_adapter_inventory_sha256. U1 rejects all four files;
 - `configurations/NNN.json`, `responses/NNN.json`, and `budgets/NNN.json` are
   separately admitted fixed-index metadata assets only when referenced by the
   exact asset inventory or U policy. Each is parsed by its exact approved

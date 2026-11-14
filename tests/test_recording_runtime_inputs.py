@@ -24,6 +24,7 @@ def fixture(root,count=20):
     allbundles={};crows=[]
     budget=dict(unit='fixture',pricing_revision='1',ceiling=100,max_calls=256,max_inflight=4,receipt_limit=128)
     config=dict(delay_ms=0)
+    prompt=dict(schema_version=1,kind='recording_visual_prompt',question='Describe the original capture.')
     responses=dict(schema_version=1,kind='fixture_completions',rows=[])
     u['adapters'][0]['config']['responses_sha256']=digest(responses)
     for n in range(count):
@@ -35,7 +36,9 @@ def fixture(root,count=20):
         for a,arm in zip(profiles['arms'],arms):
             a['deliveries'][0]['config_sha256']=None if a['arm']=='A' else digest(config)
             policy=deepcopy(policy_fixture()[0]['arms']['ABC'.index(arm['arm'])]['recording_policies'][0]);policy['recording_id']=rid
-            policy['deliveries']=deepcopy(a['deliveries']);arm['recording_policies'].append(policy)
+            policy['deliveries']=deepcopy(a['deliveries'])
+            if policy['periodic'] is not None:policy['periodic']['prompt_policy_sha256']=digest(prompt)
+            arm['recording_policies'].append(policy)
             for controller in arm['controllers']:controller['budget_sha256']=digest(budget)
         declaration['profiles_sha256']=digest(profiles);u['recordings'].append(declaration);allbundles[rid]=bundle
         crows.append(dict(recording_id=rid,source_manifest_sha256=digest(bundle['manifest']),tasks_sha256=digest(bundle['tasks']),profiles_sha256=digest(profiles),task_ids=[str(n)],duration_ns=bundle['manifest']['duration_ns']))
@@ -57,8 +60,9 @@ def fixture(root,count=20):
     def file(path,value):
         data=encoded(value)+b'\n';target=root/path;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(data)
         return dict(path=path,file_sha256=hashlib.sha256(data).hexdigest(),bytes=len(data))
+    promptref=file('configurations/001.json',prompt)
     configref=file('configurations/000.json',config);responseref=file('responses/000.json',responses);file('budgets/000.json',budget)
-    assets=dict(schema_version=1,kind='recording_runtime_assets',assets=[dict(asset_id='vision-config',kind='provider_config',path=configref['path'],sha256=configref['file_sha256'],bytes=configref['bytes']),dict(asset_id='fixture-responses',kind='fixture_responses',path=responseref['path'],sha256=responseref['file_sha256'],bytes=responseref['bytes'])],dependencies=[],resident_state=[])
+    assets=dict(schema_version=1,kind='recording_runtime_assets',assets=[dict(asset_id='visual-prompt',kind='system_template',path=promptref['path'],sha256=promptref['file_sha256'],bytes=promptref['bytes']),dict(asset_id='vision-config',kind='provider_config',path=configref['path'],sha256=configref['file_sha256'],bytes=configref['bytes']),dict(asset_id='fixture-responses',kind='fixture_responses',path=responseref['path'],sha256=responseref['file_sha256'],bytes=responseref['bytes'])],dependencies=[],resident_state=[])
     documents=dict(policy=u,plan=p,latency=l,collection=collection,scopes=q,instrumentation=i,assets=assets)
     for key,value in documents.items():file('runtime/'+key+'.json',value)
     index=dict(schema_version=1,kind='recording_runtime_input_sources',collection_sha256=digest(collection),runtime_policy_sha256=digest(u),recordings=[])

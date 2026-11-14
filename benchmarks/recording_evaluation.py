@@ -262,6 +262,58 @@ class RecordingEvaluationSession(RecordingScopeOwner):
         if request_sha256!=expected: raise ValueError('source request descriptor hash differs')
         return self._admit(evaluation_scope,operation_kind,request_sha256,evidence_sha256,refs=refs)
 
+    def operation_reference(self,entry_binding):
+        """Resolve an original actual semantic binding without ambient last-call state."""
+        from humansense.native_entry import NativeEntryBinding
+        from humansense.native_operation import _issue_operation_reference
+        if type(entry_binding) is not NativeEntryBinding:
+            raise TypeError('actual immutable semantic entry binding required')
+        value=entry_binding.snapshot()
+        with self._lock:
+            ei=integer(value['entry']['entry_ordinal'],0,self._entries-1)
+            row=struct.unpack_from('<IIIIQII32s32s32s',self._entry_table,ei*128)
+            scope=self._handle(row[1],row[2]);binding=self._binding(scope)
+            instance=digest(['gamst.recording.instance.v1',self.context['nonce'],ei])
+            entered=self._entry_digests[ei*32:(ei+1)*32].hex()
+            prompt=None if row[9]==b'\0'*32 else row[9].hex()
+            expected=dict(schema_version=1,owner_kind='recording_native4',owner=self.binding_owner(scope),
+                entry=dict(ticket_ordinal=row[0],entry_ordinal=ei,instance_sha256=instance,
+                    request_decision_sha256=row[8].hex(),entered_event_sha256=entered),
+                provider=binding['provider'],model_revision=binding['model_revision'],role=binding['role'],prompt_sha256=prompt)
+            if value!=expected:raise ValueError('binding does not identify this owner actual entry')
+            return _issue_operation_reference(dict(context=dict(self.context),scope_index=row[1],binding_index=row[2],
+                ticket_ordinal=row[0],entry_ordinal=ei,instance_sha256=instance,worker_ordinal=row[3],
+                entered_event_sha256=entered,request_sha256=row[8].hex(),evidence_sha256=row[7].hex(),prompt_sha256=prompt))
+
+    def capture_references(self,operation_reference):
+        """Recover a direct source ticket's exact committed single-capture input.
+
+        Source process/endpoint/finish reserve the original record digest as
+        evidence and a canonical descriptor as request. Both are checked here;
+        semantic Context evidence cannot masquerade as a physical capture.
+        """
+        from humansense.native_operation import NativeOperationRef
+        if type(operation_reference) is not NativeOperationRef:raise TypeError('actual operation reference required')
+        value=operation_reference.snapshot()
+        with self._lock:
+            ei=integer(value['entry_ordinal'],0,self._entries-1)
+            row=struct.unpack_from('<IIIIQII32s32s32s',self._entry_table,ei*128)
+            expected=dict(context=dict(self.context),scope_index=row[1],binding_index=row[2],ticket_ordinal=row[0],
+                entry_ordinal=ei,instance_sha256=digest(['gamst.recording.instance.v1',self.context['nonce'],ei]),worker_ordinal=row[3],
+                entered_event_sha256=self._entry_digests[ei*32:(ei+1)*32].hex(),request_sha256=row[8].hex(),
+                evidence_sha256=row[7].hex(),prompt_sha256=None if row[9]==b'\0'*32 else row[9].hex())
+            if value!=expected or row[1]!=0 or value['prompt_sha256'] is not None:raise ValueError('foreign or non-source actual operation')
+            manifest=self.declarations['source_manifest'];mapping=digest(self._mapping)
+            for ri,record in enumerate(manifest['records']):
+                if digest(record)!=value['evidence_sha256']:continue
+                si=next(i for i,source in enumerate(manifest['sources']) if source['source_id']==record['source_id'])
+                refs=[dict(kind='capture',source_index=si,capture_ordinal=ri,record_sha256=value['evidence_sha256'],mapping_sha256=mapping)]
+                if record['source_id'] not in self._bindings[row[2]]['source_ids']:raise ValueError('source outside original binding')
+                if not any(digest(dict(binding=row[2],operation_kind=kind,capture_refs=refs))==value['request_sha256']
+                        for kind in self._bindings[row[2]]['operation_kinds']):raise ValueError('actual source request differs from original capture')
+                return refs
+        raise ValueError('actual operation does not identify an original source capture')
+
     async def attach_declared_receipt(self,entry_binding,receipt,source_document):
         from humansense.native_entry import NativeEntryBinding
         if type(entry_binding) is not NativeEntryBinding:raise TypeError('actual immutable native entry binding required')

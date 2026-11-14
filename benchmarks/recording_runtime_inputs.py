@@ -309,9 +309,9 @@ class OwnedRuntimeInputs:
         for path in budgets:
             keys(docs[path],('unit','pricing_revision','ceiling','max_calls','max_inflight','receipt_limit'))
             CallBudget(**docs[path])
-        allowed=set(budgets);configs={};responses={};worker_hashes={};asset_paths=set()
+        allowed=set(budgets);configs={};responses={};worker_hashes={};prompts={};asset_paths=set()
         for asset in docs['runtime/assets.json']['assets']:
-            if asset['kind'] not in ('worker_config','provider_config','fixture_responses'):continue
+            if asset['kind'] not in ('worker_config','provider_config','fixture_responses','system_template'):continue
             # Internal JSON assets use fixed enumerated relative names or exact
             # absolute names under this root; external executable/checkpoints
             # remain a separate asset preflight and cannot smuggle JSON inputs.
@@ -334,11 +334,14 @@ class OwnedRuntimeInputs:
                 validate_fixture_responses(docs[path])
                 if digest(docs[path]) in responses:raise ValueError('duplicate original fixture response inventory')
                 responses[digest(docs[path])]=docs[path]
+            elif asset['kind']=='system_template':
+                from .recording_runtime_contract import validate_visual_prompt
+                validate_visual_prompt(docs[path],digest(docs[path]));prompts[digest(docs[path])]=docs[path]
             else:
                 from humansense.providers.smolvlm_native import configuration
                 if configuration(docs[path])!=docs[path]:raise ValueError('explicit effective worker configuration required')
                 worker_hashes[asset['sha256']]=docs[path]
-        required_configs=set();required_responses=set();required_workers=set()
+        required_configs=set();required_responses=set();required_workers=set();required_prompts=set()
         for adapter in policy['adapters']:
             if adapter['implementation']=='fixture_completion_v1':
                 required_responses.add(adapter['config']['responses_sha256'])
@@ -346,6 +349,8 @@ class OwnedRuntimeInputs:
                 required_workers.add(adapter['config']['worker_config_sha256'])
         for arm in policy['arms']:
             for recording in arm['recording_policies']:
+                if recording['periodic'] is not None:
+                    required_prompts.add(recording['periodic']['prompt_policy_sha256'])
                 for delivery in recording['deliveries']:
                     if delivery['profile']=='acquire_only':continue
                     h=delivery['config_sha256'];required_configs.add(h)
@@ -362,7 +367,7 @@ class OwnedRuntimeInputs:
                     if h not in configs:raise ValueError('missing direct fill configuration')
                     from humansense.providers.fill import _configuration
                     if encoded(_configuration(**configs[h]))!=encoded(configs[h]):raise ValueError('explicit effective fill configuration required')
-        if set(configs)!=required_configs or set(responses)!=required_responses or set(worker_hashes)!=required_workers:
+        if set(configs)!=required_configs or set(responses)!=required_responses or set(worker_hashes)!=required_workers or set(prompts)!=required_prompts:
             raise ValueError('missing or unreferenced configuration/response input')
         return allowed
 

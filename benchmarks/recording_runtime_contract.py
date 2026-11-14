@@ -301,8 +301,10 @@ def _fill(value, lanes):
             raise ValueError('fill small/strong must share actual escalation controller')
     _keys(value['charge_ceilings'], ('initial', 'reinspection', 'strong'))
     for amount in value['charge_ceilings'].values():
-        if amount is not None: _integer(amount, 0, N)
+        if amount is not None: _integer(amount, 0, 1_000_000_000_000)
     _integer(value['chain_ceiling'], 0, 3_000_000_000_000)
+    if sum(x for x in value['charge_ceilings'].values() if x is not None)>value['chain_ceiling']:
+        raise ValueError('fill stage authorizations exceed original chain ceiling')
     identifier(value['pricing_revision']); identifier(value['unit'])
     _integer(value['stage_timeout_ms'], 10, 10000); _integer(value['retention_ms'], 1, 60000)
 
@@ -441,6 +443,11 @@ def validate_runtime_policy(value, *, comparison_plan, latency_policy, source_bu
             if arm['arm'] == 'A' and fill is not None: raise ValueError('A cannot trigger conditional fill inference')
             if fill is not None:
                 _fill(fill, lanes)
+                if controllers[lanes[fill['small_lane_id']]['controller_id']]['policy']['mode']!='escalation':
+                    raise ValueError('fill requires actual escalation controller policy')
+                if any(adapters[lanes[lid]['adapter_id']]['implementation']=='smolvlm_process_v1' for lid in
+                        (fill['small_lane_id'],fill['strong_lane_id']) if lid is not None):
+                    raise ValueError('fill JSON question stages require VisualContextCalls compatible client')
                 if fill['source_id'] != declarations[rid]['primary_visual_source_id']: raise ValueError('fill must use selected original visual source')
                 used_lanes.add(fill['small_lane_id'])
                 if fill['strong_lane_id'] is not None: used_lanes.add(fill['strong_lane_id'])
@@ -449,3 +456,13 @@ def validate_runtime_policy(value, *, comparison_plan, latency_policy, source_bu
         raise ValueError('ABC text consumers must have identical adapter/model/policy/charge semantics')
     for rid, bundle in source_bundles.items(): validate_profiles_v2(bundle['profiles'], manifests[rid], policies[rid])
     return ValidatedRuntimePolicy(encoded(value))
+
+
+def validate_visual_prompt(value,expected_sha256):
+    _keys(value,('schema_version','kind','question'))
+    _integer(value['schema_version'],1,1)
+    if value['kind']!='recording_visual_prompt' or digest(value)!=expected_sha256:
+        raise ValueError('original finite visual prompt policy required')
+    text(value['question'],4096)
+    if not value['question'].strip():raise ValueError('nonempty original visual question required')
+    return value['question']
