@@ -358,7 +358,7 @@ class OwnedRuntimeInputs:
                     prompt_hash=recording['periodic']['prompt_policy_sha256'];required_prompts.add(prompt_hash)
                     if recording['periodic']['scheduler']=='smolvlm_sentinel_v1':
                         from humansense.providers.smolvlm_native import PROMPT
-                        if prompt_hash not in prompts or docs[prompts[prompt_hash]]['question']!=PROMPT:
+                        if prompt_hash not in prompts or prompts[prompt_hash]['question']!=PROMPT:
                             raise ValueError('original fixed Smol prompt policy required before worker startup')
                 for delivery in recording['deliveries']:
                     if delivery['profile']=='acquire_only':continue

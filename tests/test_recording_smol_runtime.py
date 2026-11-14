@@ -60,6 +60,21 @@ class Admission(unittest.TestCase):
     def admit(self,case=None):
         a,assets,docs,inventory,_,_=case or self.case
         return smol._admit(a,assets,docs,inventory,'smolvlm_sentinel_v1')
+
+    def test_owned_metadata_loader_resolves_original_fixed_smol_prompt(self):
+        from benchmarks.recording_runtime_inputs import OwnedRuntimeInputs
+        from humansense.providers.smolvlm_native import PROMPT
+        a,assets,docs,_,_,_=deepcopy(self.case)
+        prompt=dict(schema_version=1,kind='recording_visual_prompt',question=PROMPT)
+        path='configurations/001.json';docs[path]=prompt
+        raw=encoded(prompt)+b'\n'
+        assets['assets'].append(dict(asset_id='prompt',kind='system_template',path=path,
+            sha256=hashlib.sha256(raw).hexdigest(),bytes=len(raw)))
+        docs['runtime/assets.json']=assets
+        policy=dict(adapters=[a],arms=[dict(controllers=[],recording_policies=[dict(periodic=dict(
+            scheduler='smolvlm_sentinel_v1',prompt_policy_sha256=digest(prompt)),deliveries=[],fill_chain=None)])])
+        owner=OwnedRuntimeInputs.__new__(OwnedRuntimeInputs);owner._root_path=str(self.root)
+        self.assertEqual(owner._metadata_assets(docs,policy),{'configurations/000.json',path})
     def test_actual_hashes_retained_fds_and_mutation_detection(self):
         _,_,python,pins=self.admit()
         try:

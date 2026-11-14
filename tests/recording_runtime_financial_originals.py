@@ -87,7 +87,7 @@ def financial_originals(joined,manifest,documents,output,store):
     pages=[];pending=[]
     for row in costs:
         if pending and (len(pending)==128 or len(encode(dict(schema_version=2,kind='recording_cost_lines',
-                page_ordinal=len(pages),previous_page_sha256='0'*64,entries=[*pending,row]),maximum=1024**2,newline=True))>65536):
+                page_ordinal=len(pages),previous_page_sha256='0'*64,entries=[*pending,row]),1024**2,newline=True))>65536):
             pages.append(pending);pending=[]
         pending.append(row)
     if pending:pages.append(pending)
