@@ -32,7 +32,7 @@ class FailedCollection(unittest.IsolatedAsyncioTestCase):
             with patch('asyncio.create_subprocess_exec',spawn),patch.object(coordinator,'_run_one',run):
                 with self.assertRaises(asyncio.CancelledError):
                     await coordinator.run_recording_collection(fixture.root,root/'output',
-                        expected_execution_sha256=fixture.execution_sha256s[0])
+                        expected_execution_sha256=fixture.execution_sha256s[0],retain_evaluation_artifacts=True)
             self.assertEqual(invocations,[0,1,2])
             self.assertEqual(len(children),2)
             self.assertTrue(all(child.returncode is not None for child in children))

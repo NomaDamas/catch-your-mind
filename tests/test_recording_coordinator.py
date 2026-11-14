@@ -80,3 +80,48 @@ class Receipt(unittest.TestCase):
         with self.assertRaises(ValueError):_receipt('b'*64,task,anchor=1000,result=result,result_sha256='d'*64,received_ns=1019)
 
 if __name__=='__main__':unittest.main()
+
+class ActivationPreflight(unittest.TestCase):
+    def test_credentials_cannot_restore_loader_search_paths(self):
+        from benchmarks.recording_coordinator import _environment
+        for name in ('PYTHONPATH','PYTHONHOME','PYTHONSTARTUP','LD_PRELOAD','DYLD_INSERT_LIBRARIES',
+                     'PATH','HOME','BASH_ENV','TMPDIR','GAMST_RECORDING_FD_V2','OPENSSL_CONF','VIRTUAL_ENV','HF_HOME','SSL_CERT_FILE'):
+            with self.subTest(name=name),patch.dict('os.environ',{name:'synthetic-not-a-secret'},clear=True):
+                with self.assertRaises(ValueError):_environment({'adapters':[{'config':{'api_key_env':name}}]})
+        with patch.dict('os.environ',{'LOCAL_API_KEY':'synthetic','PYTHONPATH':'forbidden','LD_PRELOAD':'forbidden'},clear=True):
+            env=_environment({'adapters':[{'config':{'api_key_env':'LOCAL_API_KEY'}}]})
+        self.assertEqual(env,{'LOCAL_API_KEY':'synthetic'})
+
+    def test_selected_smol_timeout_added_once_before_activation(self):
+        from benchmarks.recording_coordinator import _startup_budget_ns
+        docs={'runtime/collection.json':{'recordings':[{'recording_id':'r'}]},
+              'runtime/policy.json':{'adapters':[
+                  {'adapter_id':'worker','implementation':'smolvlm_process_v1','config':{'startup_timeout_ms':120000}},
+                  {'adapter_id':'unused','implementation':'smolvlm_process_v1','config':{'startup_timeout_ms':120000}}],
+                  'arms':[{'arm':'A','lanes':[{'lane_id':'vision','adapter_id':'worker'}],
+                           'recording_policies':[{'recording_id':'r','periodic':{'lane_id':'vision'}}]}]}}
+        invocation={'arm':'A','recording_index':0}
+        self.assertEqual(_startup_budget_ns(docs,invocation),150_000_000_000)
+        docs['runtime/policy.json']['arms'][0]['recording_policies'][0]['periodic']=None
+        self.assertEqual(_startup_budget_ns(docs,invocation),30_000_000_000)
+
+
+class ExplicitRetention(unittest.IsolatedAsyncioTestCase):
+    async def test_omitted_consent_rejects_before_input_or_output_activation(self):
+        from benchmarks.recording_coordinator import run_recording_collection
+        with tempfile.TemporaryDirectory(dir='.') as temporary:
+            root=Path(temporary).resolve()
+            with patch.object(OwnedRuntimeInputs,'open',side_effect=AssertionError('input activation')):
+                with self.assertRaises(PermissionError):
+                    await run_recording_collection(root/'missing',root/'output',expected_execution_sha256='0'*64)
+            self.assertFalse((root/'output').exists())
+
+class JoinWorkspaceAdmission(unittest.TestCase):
+    def test_retained_prior_runs_are_not_reset_between_invocations(self):
+        from benchmarks.recording_coordinator import _admit_join_workspace
+        mib=1024**2
+        admitted=_admit_join_workspace(20*mib,[dict(peak_workspace_bytes=40*mib,retained_workspace_bytes=10*mib)]*6)
+        self.assertEqual(admitted['peak_workspace_bytes'],110*mib)
+        self.assertEqual(admitted['retained_workspace_bytes'],60*mib)
+        with self.assertRaises(ValueError):_admit_join_workspace(150*mib,[dict(peak_workspace_bytes=80*mib,retained_workspace_bytes=30*mib)]*2)
+        with self.assertRaises(ValueError):_admit_join_workspace(0,[dict(peak_workspace_bytes=1,retained_workspace_bytes=65*mib)]*2)

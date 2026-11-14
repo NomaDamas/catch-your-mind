@@ -112,3 +112,22 @@ collection budget. The exclusive final execution inventory includes actual
 retained byte counts, remains immutable with `assessments: []`, and does not
 claim numeric or actual acceptance. Subsequent assessments belong to separate
 artifacts.
+
+The Python collection API also requires explicit
+`retain_evaluation_artifacts=True`; omission fails before opening inputs. Frozen
+credential environment names must be `API_KEY`, `TOKEN`, or uppercase names
+ending `_API_KEY`/`_TOKEN` (bounded to 121 characters), and may never use Python,
+loader, transport, or process-activation prefixes. Other inherited search-path
+and loader variables are not forwarded. Selected Smol startup uses the original
+frozen timeout in addition to the parent's 30-second generic startup ceiling;
+this deadline is never restarted and does not shift original task clocks.
+
+The nonwire result preserves `validated_runs` as a tuple of original
+validator-issued objects and `artifact_budget` as the same shared budget owner.
+These are not serialized or reconstructed from JSON. Finance must reuse that
+budget for later separate artifacts. Parent preflight accounts for original
+input workspace, each run's peak join, and all previously retained typed runs;
+retained runs are bounded jointly to 128 MiB and the combined parent workspace
+to 256 MiB. Structural completeness includes the typed join's completeness,
+while assessments and numeric eligibility remain unchanged in the sealed
+execution inventory.

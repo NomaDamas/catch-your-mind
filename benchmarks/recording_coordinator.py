@@ -9,6 +9,7 @@ import hashlib
 import os
 from pathlib import Path
 import secrets
+import re
 import stat
 import sys
 import sysconfig
@@ -91,15 +92,55 @@ def _runtime_bound(documents,invocation):
         task_artifact_bytes=min(task_bytes,4*1024**2))
     result['maximum_bytes']+=max(0,task_bytes-4*1024**2)+4*65536
     if result['maximum_bytes']>16*1024**2:raise ValueError('derived runtime metadata cannot fit16MiB')
+    result['publication_rows']=publications
     return result
+
+
+def _startup_budget_ns(documents,invocation):
+    """One immutable deadline includes only selected frozen worker startup."""
+    u=documents['runtime/policy.json']
+    arm=next(a for a in u['arms'] if a['arm']==invocation['arm'])
+    rid=documents['runtime/collection.json']['recordings'][invocation['recording_index']]['recording_id']
+    policy=next(p for p in arm['recording_policies'] if p['recording_id']==rid)
+    selected=[] if policy['periodic'] is None else [policy['periodic']['lane_id']]
+    total=30_000_000_000
+    for lane_id in selected:
+        lane=next(l for l in arm['lanes'] if l['lane_id']==lane_id)
+        adapter=next(a for a in u['adapters'] if a['adapter_id']==lane['adapter_id'])
+        if adapter['implementation']=='smolvlm_process_v1':
+            timeout=adapter['config']['startup_timeout_ms'];integer(timeout,1,120000)
+            total+=timeout*1_000_000
+    return total
+
+
+def _admit_join_workspace(input_bytes,bounds):
+    """Retained issued runs accumulate; sequential execution does not free them."""
+    integer(input_bytes,0,256*1024**2)
+    retained=0;peak=input_bytes
+    for bound in bounds:
+        current=integer(bound['peak_workspace_bytes'],0,256*1024**2)
+        held=integer(bound['retained_workspace_bytes'],0,128*1024**2)
+        peak=max(peak,input_bytes+retained+current)
+        retained+=held
+        if peak>256*1024**2 or retained>128*1024**2:
+            raise ValueError('joint parent validation/retained run workspace exceeds bound')
+    return dict(peak_workspace_bytes=peak,retained_workspace_bytes=retained)
 
 
 async def _preflight(inputs):
     docs=inputs.receipt.documents();bundles=inputs.receipt.source_bundles();c=docs['runtime/collection.json']
+    _environment(docs['runtime/policy.json']) # Fail before output or subprocess activation.
     declarations=[_declarations(docs,n) for n in range(len(c['recordings']))]
     report=await _owned_thread(preflight_runtime_collection,declarations,
         latency_policy=docs['runtime/latency.json'],source_bundles=bundles,numeric_inputs=_numeric(docs))
     bounds=[_runtime_bound(docs,inv) for inv in c['invocations']]
+    from .recording_runtime_validation import preflight_recording_run_validation
+    validation=[]
+    for inv,bound in zip(c['invocations'],bounds):
+        value=preflight_recording_run_validation(declarations[inv['recording_index']],
+            docs[f"invocations/{inv['ordinal']:02}/execution.json"],publication_rows=bound['publication_rows'])
+        bound['validation']=value;validation.append(value)
+    _admit_join_workspace(inputs.workspace_bytes,validation)
     runtime=sum(b['maximum_bytes'] for b in bounds)
     # Existing native preflight retains one source set, two native sets. Parent
     # source import is a second source set; it is checked here, charged on copy.
@@ -152,6 +193,14 @@ def _environment(policy):
     for adapter in policy['adapters']:
         name=adapter['config'].get('api_key_env')
         if name is not None:
+            # Frozen credential identifiers do not grant loader/search-path or
+            # process-activation authority to the fixed child.
+            blocked={'PATH','HOME','USER','LOGNAME','TMPDIR','TMP','TEMP','SHELL','ENV','BASH_ENV','ZDOTDIR',
+                     'LANG','LC_ALL','LC_CTYPE','SYSTEMROOT','COMSPEC','PATHEXT','IFS','CDPATH',
+                     'LIBPATH','SHLIB_PATH','NODE_OPTIONS','RUBYOPT','PERL5LIB','PERL5OPT'}
+            if (type(name) is not str or not re.fullmatch(r'(?:API_KEY|TOKEN|[A-Z][A-Z0-9_]{0,112}(?:_API_KEY|_TOKEN))',name)
+                    or name in blocked or name.startswith(('PYTHON','LD_','DYLD_','GAMST_'))):
+                raise ValueError('credential environment cannot control fixed child activation')
             if name not in os.environ:raise ValueError('explicitly frozen credential environment is unavailable')
             result[name]=os.environ[name]
     return result
@@ -263,7 +312,7 @@ def _channel_rows(native,coordinator,begin,end):
 
 async def _run_one(inputroot,stage,final,docs,bundles,declarations,budget,invocation,*,retain_financial_documents):
     ordinal=invocation['ordinal'];execution=docs[f'invocations/{ordinal:02}/execution.json'];d=declarations[invocation['recording_index']]
-    nonce=secrets.token_hex(32);now=time.monotonic_ns();startup=now+30_000_000_000
+    nonce=secrets.token_hex(32);now=time.monotonic_ns();startup=now+_startup_budget_ns(docs,invocation)
     run_deadline=startup+d['source_manifest']['duration_ns']+d['instrumentation_protocol']['close_timeout_ms']*1_000_000
     ctx=run_context(d,nonce,ordinal);environment=_environment(docs['runtime/policy.json'])
     writer=await RecordingRuntimeArtifacts.open(final,execution,budget=budget,retain_evaluation_artifacts=True)
@@ -401,7 +450,7 @@ def _write_collection(output,value,budget):
 
 
 async def run_recording_collection(inputroot,output,*,expected_execution_sha256,
-                                   retain_evaluation_artifacts=True,retain_financial_documents=False):
+                                   retain_evaluation_artifacts=False,retain_financial_documents=False):
     """Run each frozen invocation exactly once, sequentially after owned reap.
 
     expected_execution_sha256 pins original invocation0 before opening inputs;
@@ -416,17 +465,24 @@ async def run_recording_collection(inputroot,output,*,expected_execution_sha256,
         docs,bundles,declarations,bounds,budget=await _preflight(inputs)
         if retain_financial_documents is not docs['runtime/scopes.json']['retain_financial_documents']:raise PermissionError('financial retention must match original frozen policy')
         await _owned_thread(_create_output,out)
-        executions=[];runs=[];complete=True
+        executions=[];runs=[];validated_runs=[];retained_validation=0;complete=True
         for inv in docs['runtime/collection.json']['invocations']:
             n=inv['ordinal'];run_ref,run,native_inventory,activation_ns=await _run_one(str(root),out/'.staging'/f'{n:02}',out/'runs'/f'{n:02}',
                 docs,bundles,declarations,budget,inv,retain_financial_documents=retain_financial_documents)
             validated=await _owned_thread(validate_recording_run,out/'runs'/f'{n:02}',documents=docs,source_bundles=bundles,
                 invocation_ordinal=n,parent_native_inventory=native_inventory,activation_started_ns=activation_ns)
+            actual_retained=validated.retained_workspace_bytes
+            integer(actual_retained,0,128*1024**2)
+            if actual_retained>bounds[n]['validation']['retained_workspace_bytes']:
+                raise ValueError('validated run exceeds original retained-workspace admission')
+            retained_validation+=actual_retained
+            if retained_validation>128*1024**2:raise ValueError('retained validated collection exceeds128MiB')
+            validated_runs.append(validated)
             prefix=f'runs/{n:02}/'
             runs.append(dict(run_ref,path=prefix+run_ref['path']))
             execution=docs[f'invocations/{n:02}/execution.json'];data=_line(execution,65536)
             executions.append(dict(path=prefix+'execution.json',file_sha256=hashlib.sha256(data).hexdigest(),bytes=len(data)))
-            complete=complete and run['state']=='closed'
+            complete=complete and run['state']=='closed' and validated.runtime_completeness=='complete'
             if run['process_reaped_ns'] is None:raise RuntimeError('owned process reap unverified; further activation refused')
         manifest=dict(schema_version=1,kind='recording_execution_inventory',comparison_plan_sha256=digest(docs['runtime/plan.json']),
             runtime_policy_sha256=digest(docs['runtime/policy.json']),collection_sha256=digest(docs['runtime/collection.json']),
@@ -441,7 +497,7 @@ async def run_recording_collection(inputroot,output,*,expected_execution_sha256,
             manifest['total_bytes']=total
         else:raise ValueError('final inventory size did not stabilize')
         ref=await _owned_thread(_write_collection,out,manifest,budget)
-        return dict(manifest=manifest,reference=ref,actual_acceptance='incomplete')
+        return dict(manifest=manifest,reference=ref,validated_runs=tuple(validated_runs),artifact_budget=budget,actual_acceptance='incomplete')
     finally:await inputs.close()
 
 
