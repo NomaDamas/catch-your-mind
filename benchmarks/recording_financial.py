@@ -14,6 +14,7 @@ import re
 import stat
 
 from humansense.capabilities import identifier
+from humansense.recording_settlement import validate_synthetic_invoice
 
 N63 = 2**63 - 1
 N256 = 2**256 - 1
@@ -55,6 +56,71 @@ INPUT_GRAMMAR = dict(schema_version=1, kind='synthetic_invoice_fixture_input_gra
 OUTPUT_GRAMMAR = dict(schema_version=1, kind='synthetic_invoice_fixture_output_grammar',
     evidence_fields=list(EVIDENCE_FIELDS), origin='synthetic_fixture',
     claim_domain='gamst.recording.claim.v1', receipt_authenticity_verified=False)
+_RUN_ISSUER = object()
+RUN_VIOLATIONS = ('source_incomplete','clock_discontinuity','operational_incomplete',
+    'external_work_unknown','reservation_overrun','missing_native_prefix','unsupported_entry_coverage')
+
+
+@dataclass(frozen=True,slots=True,init=False)
+class FinancialRunView:
+    """Issued by the runtime's complete source/native/receipt structural join.
+
+    This is a correlation boundary, not an authenticity or isolation claim.
+    Every missing actual lifecycle timestamp remains None.
+    """
+    execution_sha256: str
+    run_inventory_sha256: str
+    invocation_ordinal: int
+    stream_id: str
+    recording_id: str
+    arm: str
+    source_manifest_sha256: str
+    source_coverage_sha256: str
+    source_comparable: bool
+    task_row_inventory_sha256: str
+    clock_domain: str
+    clock_consistent: bool
+    activation_started_ns: int
+    child_spawn_started_ns: object
+    playback_anchor_ns: object
+    source_finished_ns: object
+    child_cleanup_finished_ns: object
+    process_reaped_ns: object
+    parent_resources_closed_ns: object
+    operational_closed: bool
+    external_work_closed: bool
+    worker_inventory_sha256: str
+    semantic_unknown_instances: tuple
+    violations: tuple
+
+    def __init__(self,*,_issuer=None,**values):
+        if _issuer is not _RUN_ISSUER:
+            raise TypeError('FinancialRunView must be issued by the complete recording join')
+        keys(values,self.__dataclass_fields__,'financial run view')
+        for name in ('execution_sha256','run_inventory_sha256','source_manifest_sha256',
+                     'source_coverage_sha256','task_row_inventory_sha256','worker_inventory_sha256'):
+            sha(values[name])
+        for name in ('stream_id','recording_id','clock_domain'): identifier(values[name])
+        enum(values['arm'],'ABC'); integer(values['invocation_ordinal'],maximum=95)
+        for name in ('source_comparable','clock_consistent','operational_closed','external_work_closed'):
+            if type(values[name]) is not bool: raise ValueError('explicit observed completeness flag required')
+        integer(values['activation_started_ns'])
+        for name in ('child_spawn_started_ns','playback_anchor_ns','source_finished_ns',
+                     'child_cleanup_finished_ns','process_reaped_ns','parent_resources_closed_ns'):
+            nullable(values[name],integer)
+        unknown = tuple(values['semantic_unknown_instances'])
+        if len(unknown) > 16384 or len(set(unknown)) != len(unknown): raise ValueError('bounded unique unknown native instances required')
+        for item in unknown: sha(item)
+        violations = tuple(values['violations'])
+        if len(violations) > len(RUN_VIOLATIONS) or len(set(violations)) != len(violations): raise ValueError('finite unique run violations required')
+        for item in violations: enum(item,RUN_VIOLATIONS)
+        values['semantic_unknown_instances'] = unknown; values['violations'] = violations
+        for name,value in values.items(): object.__setattr__(self,name,value)
+
+
+def _issue_financial_run_view(**values):
+    """Internal trusted runtime-join seam, never a JSON deserializer."""
+    return FinancialRunView(_issuer=_RUN_ISSUER,**values)
 
 
 def keys(value, fields, label='object'):
@@ -233,6 +299,7 @@ def operation_key(value):
 
 def validate_invoice(value):
     value = snapshot(value)
+    value = validate_synthetic_invoice(value)
     keys(value, INVOICE_FIELDS, 'synthetic invoice')
     if (type(value['schema_version']) is not int or value['schema_version'] != 1 or
             value['kind'] != 'synthetic_recording_invoice' or
@@ -362,6 +429,7 @@ class FinancialArtifacts:
         self._closed = False
         self._metadata = self._source = self._pages = self._rows = 0
         self._files = set()
+        self._section_files = {}
 
     def close(self):
         if not self._closed:
@@ -397,7 +465,7 @@ class FinancialArtifacts:
     @staticmethod
     def _path(path):
         if type(path) is not str or re.fullmatch(
-                r'financial/(?:source/source-[0-9a-f]{64}\.json|(?:source|evidence|operations|lanes|finality|line-locators)/(?:page|index)-[0-9]{6}\.json)',path) is None:
+                r'(?:financial/(?:source/source-[0-9a-f]{64}\.json|(?:source|evidence|operations|lanes|finality|line-locators)/(?:page|index)-[0-9]{6}\.json|settlements/receipt-[0-9]{6}\.json|evidence/evidence-[0-9]{6}\.json|finality/finality-[0-9]{6}\.json)|ledger/(?:lifetime-[0-9]{3}|coverage-[0-9]{3}|cost-[0-9]{6}|closure-[0-9]{3}|validity-[0-9]{6}|late-[0-9]{6}|financial-inventory|closures|ledger|checkpoint)\.json)',path) is None:
             raise ValueError('fixed financial writer path required')
         return path
 
@@ -469,11 +537,13 @@ class FinancialArtifacts:
         count = 0
         previous = None
         batch = []
+        first_page = self._section_files.get((section,'page'),0)
+        first_index = self._section_files.get((section,'index'),0)
         def flush():
             nonlocal previous
             value = dict(schema_version=1,kind=PAGE_KINDS[section],page_ordinal=len(pages),
                          previous_page_sha256=previous,rows=list(batch))
-            ref = self.write('financial/'+section+'/page-%06d.json'%len(pages),value)
+            ref = self.write('financial/'+section+'/page-%06d.json'%(first_page+len(pages)),value)
             pages.append(ref); previous = ref['file_sha256']; batch.clear()
             self._pages += 1
         for row in rows:
@@ -496,8 +566,10 @@ class FinancialArtifacts:
                 raise ValueError('financial data/index page capacity exhausted')
             value = dict(schema_version=1,kind='recording_financial_index_page',page_kind=PAGE_KINDS[section],
                          page_ordinal=index_count,previous_page_sha256=previous,pages=pages[start:start+128])
-            tail = self.write('financial/'+section+'/index-%06d.json'%index_count,value)
+            tail = self.write('financial/'+section+'/index-%06d.json'%(first_index+index_count),value)
             previous = tail['file_sha256']; index_count += 1; self._pages += 1
+        self._section_files[section,'page'] = first_page+len(pages)
+        self._section_files[section,'index'] = first_index+index_count
         return dict(row_count=count,page_count=len(pages),index_page_count=index_count,index_tail=tail)
 
 
@@ -515,10 +587,15 @@ def iter_financial_rows(store,section,index):
     if not pages or count != (pages+127)//128 or pages+count > MAX_PAGES:
         raise ValueError('financial index page/count mismatch')
     tail = reference(index['index_tail'])
+    match = re.fullmatch('financial/'+section+r'/index-([0-9]{6})\.json',tail['path'])
+    if match is None: raise ValueError('fixed financial index tail path required')
+    final_file_ordinal = int(match.group(1))
+    if final_file_ordinal < count-1: raise ValueError('financial index file ordinal underflow')
     # Index pages are bounded before retention; <=1024 refs, never all rows.
     blocks = []
     for ordinal in range(count-1,-1,-1):
-        if tail['path'] != 'financial/'+section+'/index-%06d.json'%ordinal:
+        file_ordinal = final_file_ordinal-(count-1-ordinal)
+        if tail['path'] != 'financial/'+section+'/index-%06d.json'%file_ordinal:
             raise ValueError('fixed contiguous financial index path required')
         page = store.read(tail)
         keys(page,('schema_version','kind','page_kind','page_ordinal','previous_page_sha256','pages'),'financial index page')
@@ -536,7 +613,7 @@ def iter_financial_rows(store,section,index):
                 raise ValueError('first financial index previous must be null')
         else:
             previous_hash = sha(page['previous_page_sha256'])
-            previous_path = 'financial/'+section+'/index-%06d.json'%(ordinal-1)
+            previous_path = 'financial/'+section+'/index-%06d.json'%(file_ordinal-1)
             # Find exact bounded predecessor length without following a caller path.
             directory,name = store._open_parent(previous_path)
             try:
@@ -548,9 +625,12 @@ def iter_financial_rows(store,section,index):
     refs = [ref for block in reversed(blocks) for ref in block]
     if len(refs) != pages:
         raise ValueError('financial data page count mismatch')
-    previous = None; seen = set(); actual_rows = 0
+    previous = None; seen = set(); actual_rows = 0; first_file_ordinal = None
     for ordinal,ref in enumerate(refs):
-        path = 'financial/'+section+'/page-%06d.json'%ordinal
+        match = re.fullmatch('financial/'+section+r'/page-([0-9]{6})\.json',ref['path'])
+        if match is None: raise ValueError('fixed financial data page path required')
+        if first_file_ordinal is None: first_file_ordinal = int(match.group(1))
+        path = 'financial/'+section+'/page-%06d.json'%(first_file_ordinal+ordinal)
         if ref['path'] != path or ref['file_sha256'] in seen:
             raise ValueError('duplicate/aliased financial page')
         seen.add(ref['file_sha256'])
