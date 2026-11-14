@@ -134,11 +134,11 @@ def _open(directory,path):
     finally:os.close(fd)
 
 
-def _fixed(directory,path,maximum=65536):
+def _fixed(directory,path,maximum=65536,*,minimum=1):
     fd=_open(directory,path)
     try:
         info=os.fstat(fd)
-        if not 1<=info.st_size<=maximum:raise ValueError('bounded original evidence required')
+        if not minimum<=info.st_size<=maximum:raise ValueError('bounded original evidence required')
         result=dict(path=path,file_sha256=None,bytes=info.st_size)
         h=hashlib.sha256();count=0
         while True:
@@ -190,10 +190,14 @@ def _declarations(documents,bundles,invocation):
 
 
 def _capture(ref,manifest,mapping,acquired,acquired_ns,*,before=None):
+    return _capture_prefix(ref,manifest,digest(mapping),acquired,acquired_ns,before=before)
+
+
+def _capture_prefix(ref,manifest,mapping_sha,acquired,acquired_ns,*,before=None):
     keys(ref,('kind','source_index','capture_ordinal','record_sha256','mapping_sha256'))
     si=integer(ref['source_index'],0,len(manifest['sources'])-1);ri=integer(ref['capture_ordinal'],0,len(manifest['records'])-1)
     record=manifest['records'][ri]
-    if (ref['kind']!='capture' or ref['record_sha256']!=digest(record) or ref['mapping_sha256']!=digest(mapping) or
+    if (ref['kind']!='capture' or ref['record_sha256']!=digest(record) or ref['mapping_sha256']!=mapping_sha or
             record['source_id']!=manifest['sources'][si]['source_id'] or acquired[ri]!=2):
         raise ValueError('evidence requires an actually acquired original capture')
     if before is not None and acquired_ns[ri]>before:raise ValueError('future acquired capture cannot be evidence for earlier work')
@@ -212,7 +216,7 @@ def _operation_captures(op,publications):
     return matches[0]['capture_refs']
 
 
-def _publication_source(row,record,d,execution,mapping,source_mappings):
+def _publication_source(row,record,d,execution,mapping,source_mappings,*,mapping_sha=None):
     recording=next(r for r in d['runtime_policy']['recordings'] if r['recording_id']==d['source_manifest']['recording_id'])
     if record.get('subject_id')!=recording['subject_id']:raise ValueError('accepted publication changed frozen subject')
     capability=record['observation'].get('capability',{}).get('id')
@@ -225,20 +229,22 @@ def _publication_source(row,record,d,execution,mapping,source_mappings):
     if len(row['capture_refs'])!=1:raise ValueError('initial recorded provider output requires one exact original capture')
     ref=row['capture_refs'][0];source=d['source_manifest']['sources'][ref['source_index']];capture=d['source_manifest']['records'][ref['capture_ordinal']]
     sensor=record['observation'].get('sensor',{});binding=next(b for b in recording['source_bindings'] if b['source_id']==source['source_id'])
-    if (record['timestamp_ms']!=mapping['sdk_anchor_ms']+capture['offset_ns']//1_000_000 or
+    integer(record['timestamp_ms'])
+    if (mapping is not None and record['timestamp_ms']!=mapping['sdk_anchor_ms']+capture['offset_ns']//1_000_000 or
             any(sensor.get(k)!=source[k] for k in ('source_id','sensor_id','calibration_id')) or
             sensor.get('sequence')!=capture['sequence'] or sensor.get('capture_sequence')!=capture['sequence'] or
             sensor.get('coordinate_frame')!=binding['coordinate_frame'] or sensor.get('channels')!=([] if binding['channels'] is None else binding['channels'])):
         raise ValueError('accepted publication changed original capture time/sensor/coordinates')
     expected_epoch=source['stream_epoch']
-    if row['role']=='specialist_result':
+    if row['role']=='specialist_result' and source_mappings:
         epochs=[e['stream_epoch'] for e in source_mappings[ref['source_index']]['provider_epochs'] if e['capability_id']==capability]
         if len(epochs)!=1:raise ValueError('specialist publication has no frozen original provider epoch')
         expected_epoch=epochs[0]
-    if sensor.get('stream_epoch')!=expected_epoch:raise ValueError('accepted publication changed original delivery/capture epoch')
+    if (row['role']!='specialist_result' or source_mappings) and sensor.get('stream_epoch')!=expected_epoch:
+        raise ValueError('accepted publication changed original delivery/capture epoch')
     if row['role']=='raw_capture_descriptor':
         expected=dict(source_manifest_sha256=digest(d['source_manifest']),record_sha256=digest(capture),record_ordinal=ref['capture_ordinal'],
-            payload_sha256=capture['payload_sha256'],original_capture_ns=capture['capture_ns'],mapping_sha256=digest(mapping))
+            payload_sha256=capture['payload_sha256'],original_capture_ns=capture['capture_ns'],mapping_sha256=digest(mapping) if mapping is not None else mapping_sha)
         if record['observation']['value']!={'capture':expected}:raise ValueError('visual descriptor changed original captured image identity')
 
 
@@ -250,7 +256,20 @@ def _source(directory,capture,manifest,mapping,max_lateness):
     if capture['source_counters']!=capture['source_terminal']:raise ValueError('source counters must retain original terminal')
     if len(capture['source_events'])!=1 or capture['source_events'][0]['path']!='source/journal.jsonl':
         raise ValueError('one original source journal required')
-    ref=capture['source_events'][0];keys(ref,('path','file_sha256','bytes'));sha(ref['file_sha256']);integer(ref['bytes'],0,1024**3)
+    return _source_prefix(directory,capture['source_terminal'],capture['source_events'][0],terminal,manifest,mapping,max_lateness)
+
+
+def _source_prefix(directory,terminal_ref,ref,terminal,manifest,mapping,max_lateness):
+    """Validate retained acquisition even when its mapping write never finished.
+
+    Missing replay coordinates remain unknown. Original event identities,
+    capture payloads, counters and source-owned financial files still bind.
+    """
+    keys(ref,('path','file_sha256','bytes'));sha(ref['file_sha256']);integer(ref['bytes'],0,1024**3)
+    if ref['path']!='source/journal.jsonl':raise ValueError('one original source journal required')
+    mapping_sha=terminal['summary']['mapping_sha256']
+    if mapping_sha is not None:sha(mapping_sha)
+    if mapping is not None and mapping_sha!=digest(mapping):raise ValueError('source terminal changed original replay mapping')
     flags=bytearray(len(manifest['records']));times=array('Q',[0])*len(flags)
     counters=[dict(attempted=0,captured=0,dropped=0) for _ in manifest['sources']]
     mapping_events=[];settlement_events=[]
@@ -276,10 +295,14 @@ def _source(directory,capture,manifest,mapping,max_lateness):
                 if event['event'] not in ('capture_acquired','capture_drop'):continue
                 f=event['fields'];ri=integer(f['ordinal'],0,len(flags)-1);record=manifest['records'][ri];si=sources[record['source_id']]
                 if flags[ri] or f['source_id']!=record['source_id'] or f['sequence']!=record['sequence']:raise ValueError('source capture duplicate/rebound')
-                offset=record['offset_ns'];scheduled=mapping['monotonic_anchor_ns']+offset
-                expected=dict(mapping_sha256=digest(mapping),original_capture_ns=manifest['origin_capture_ns']+offset,
-                    scheduled_monotonic_ns=scheduled,sdk_timestamp_ms=mapping['sdk_anchor_ms']+offset//1000000,
+                offset=record['offset_ns'];scheduled=integer(f['scheduled_monotonic_ns'])
+                integer(f['sdk_timestamp_ms'])
+                expected=dict(mapping_sha256=mapping_sha,original_capture_ns=manifest['origin_capture_ns']+offset,
                     submillisecond_remainder_ns=offset%1000000)
+                if mapping is not None:
+                    expected.update(scheduled_monotonic_ns=mapping['monotonic_anchor_ns']+offset,
+                        sdk_timestamp_ms=mapping['sdk_anchor_ms']+offset//1000000)
+                if mapping_sha is None:raise ValueError('captured source prefix requires its original bound mapping hash')
                 if any(f[k]!=v for k,v in expected.items()) or now<scheduled:raise ValueError('source capture changed original replay time')
                 counters[si]['attempted']+=1
                 if event['event']=='capture_acquired':
@@ -303,16 +326,57 @@ def _source(directory,capture,manifest,mapping,max_lateness):
                 row['attempted']!=row['captured']+row['dropped'] or row['offered']!=row['captured'] or
                 row['admitted']+row['refused']!=row['offered']):raise ValueError('original source/delivery counters do not reconcile')
     reached=summary.get('terminal_reached_ns');finished=summary.get('cleanup_finished_ns')
-    if reached is not None:integer(reached,mapping['monotonic_anchor_ns']+manifest['duration_ns'])
+    if reached is not None:integer(reached,0 if mapping is None else mapping['monotonic_anchor_ns']+manifest['duration_ns'])
     if finished is not None:integer(finished,last_time)
-    complete=(all(x==2 for x in flags) and not late and reached is not None and terminal['cleanup_finished'] is True and
+    complete=(mapping is not None and all(x==2 for x in flags) and not late and reached is not None and terminal['cleanup_finished'] is True and
         j['failure'] is None and j['unwritten_events']==0 and terminal['state']=='replayed_unscored' and summary['mapping_sha256']==digest(mapping))
-    coverage=dict(schema_version=1,kind='recording_validated_source_coverage',source_manifest_sha256=digest(manifest),mapping_sha256=digest(mapping),
-        source_terminal=capture['source_terminal'],source_events=ref,source_counters=declared,availability_sha256=digest(manifest['availability']),
+    coverage=dict(schema_version=1,kind='recording_validated_source_coverage',source_manifest_sha256=digest(manifest),mapping_sha256=mapping_sha,
+        source_terminal=terminal_ref,source_events=ref,source_counters=declared,availability_sha256=digest(manifest['availability']),
         record_inventory_sha256=digest(manifest['records']),capture_partition_sha256=hashlib.sha256(flags).hexdigest(),
         actual_capture_count=sum(x==2 for x in flags),drop_count=sum(x==1 for x in flags),uninspected_count=sum(x==0 for x in flags),
         max_acquisition_lateness_ns=max_lateness,source_comparable=complete)
     return flags,times,terminal,coverage,complete,reached,finished,mapping_events,settlement_events
+
+
+def _failed_source(directory,ref,d,execution,mapping,max_lateness):
+    """Read the real failed terminal independently of optional capture metadata."""
+    if ref['path']!='source/terminal.json':raise ValueError('fixed original source terminal required')
+    terminal=_json(directory,ref,maximum=1024**2,original=True)
+    if terminal.get('schema_version')!=1 or terminal.get('state') not in ('failed','replayed_unscored') or terminal.get('cleanup_finished') is not True:
+        raise ValueError('unconfirmed source inventory requires an original cleaned terminal')
+    allowed={'source-manifest.json','tasks.json','profiles.json','execution.json','mapping.json',
+        'source-mappings.json','mapping-records.json','controller-settlements.json'}
+    retained={};names=set()
+    for original in terminal['files']:
+        keys(original,('path','sha256','bytes'))
+        name=original['path']
+        if name not in allowed or name in names:raise ValueError('unlisted or duplicate original failed source file')
+        names.add(name)
+        # Check every retained file digest, including empty financial inventories.
+        maximum=65536 if name=='mapping-records.json' else 1024**2 if name=='controller-settlements.json' else 64*1024**2
+        value=_json(directory,dict(path='source/'+name,file_sha256=original['sha256'],bytes=original['bytes']),maximum=maximum,original=True)
+        if name in ('mapping.json','source-mappings.json'):retained[name]=value
+        value=None
+    if 'mapping.json' in retained:
+        actual=retained['mapping.json'];validate_metadata('mapping',actual,digest(execution))
+        if mapping is not None and actual!=mapping:raise ValueError('retained source replay mapping differs')
+        mapping=actual
+    mappings=retained.get('source-mappings.json',[])
+    if 'source-mappings.json' in retained:
+        validate_metadata('source-mappings',mappings,digest(execution))
+        if mapping is None or len(mappings)!=len(d['source_manifest']['sources']):raise ValueError('source prefix requires its original mapping')
+        for source,mapped in zip(d['source_manifest']['sources'],mappings):
+            if mapped['original_source']!=source or mapped['mapping_sha256']!=digest(mapping) or any(mapped[k]!=v for k,v in mapping.items()):
+                raise ValueError('source prefix changed original reversible mapping')
+    if mapping is not None:
+        manifest=d['source_manifest']
+        if mapping['source_manifest_sha256']!=digest(manifest) or any(mapping[k]!=manifest[k] for k in ('recording_id','origin_capture_ns','duration_ns')):
+            raise ValueError('source prefix changed original manifest mapping')
+    journal=_fixed(directory,'source/journal.jsonl',1024**3,minimum=0)
+    result=_source_prefix(directory,ref,journal,terminal,d['source_manifest'],mapping,max_lateness)
+    events=result[-2]
+    files,records=_source_files(directory,terminal,d,execution,mapping,mappings,events)
+    return result,files,records,mapping,mappings
 
 
 def _outcomes(directory,ref,execution,kind,violations):
@@ -788,9 +852,27 @@ def validate_recording_run(directory,*,documents,source_bundles,invocation_ordin
         if (mapping['source_manifest_sha256']!=digest(m) or any(mapping[k]!=m[k] for k in ('recording_id','origin_capture_ns','duration_ns')) or
                 mapping['monotonic_anchor_ns']!=handshake['anchor_monotonic_ns']):
             raise ValueError('failed original mapping prefix differs from actual START handshake')
+    if capture is None and run['source_inventory'] is not None:
+        if run['state']!='failed':raise ValueError('closed run requires its complete original capture inventory')
+        max_lateness=50_000_000 if numeric is None else numeric['exposure_policy']['source_policy']['max_acquisition_lateness_ns']
+        prefix,source_files,mapping_records,mapping,source_mappings=_failed_source(directory,run['source_inventory'],d,execution,mapping,max_lateness)
+        flags,times,terminal,coverage,_,source_finished,cleanup_finished,mapping_events,settlement_events=prefix
+        if mapping is not None and handshake['anchor_monotonic_ns'] is not None and mapping['monotonic_anchor_ns']!=handshake['anchor_monotonic_ns']:
+            raise ValueError('retained source prefix differs from actual parent START handshake')
+        coverage['source_comparable']=False
+        violations.add('source_mapping_incomplete')
     if not clock_known:violations.add('clock_discontinuity')
     index,operations,work,counts=_native(directory,d,documents,source_bundles,numeric,parent,execution,violations,budget)
     if index is None:source_complete=False;coverage['source_comparable']=False
+    mapping_sha=None if mapping is None else digest(mapping)
+    if index is not None:
+        native_mapping=index.terminal['mapping_sha256']
+        if mapping_sha is not None and mapping_sha!=native_mapping:raise ValueError('native terminal changed original replay mapping')
+        mapping_sha=native_mapping
+    if terminal is not None:
+        if (index is not None or mapping_sha is not None) and terminal['summary']['mapping_sha256']!=mapping_sha:
+            raise ValueError('retained source/native mapping hashes differ')
+        mapping_sha=terminal['summary']['mapping_sha256']
     for op in operations.values():
         if (op['role']=='text_llm' and not 1<=op['scope_index']<=len(d['tasks']) or
                 op['role']!='text_llm' and op['scope_index']!=0):
@@ -799,7 +881,7 @@ def validate_recording_run(directory,*,documents,source_bundles,invocation_ordin
             if ref['kind']=='capture':
                 if mapping is None and (summary is None or summary['state']!='failed'):
                     raise ValueError('native capture requires original replay mapping')
-                if capture is not None:_capture(ref,d['source_manifest'],mapping,flags,times,before=op['entered_monotonic_ns'])
+                if terminal is not None:_capture_prefix(ref,d['source_manifest'],mapping_sha,flags,times,before=op['entered_monotonic_ns'])
     publications={};ordinal=0
     if summary is not None:
         for ref in _outcomes(directory,summary['publication_inventory'],execution_sha,'publications',violations):
@@ -807,10 +889,10 @@ def validate_recording_run(directory,*,documents,source_bundles,invocation_ordin
             budget.retain(row)
             if row['publication_ordinal']!=ordinal or row['record_id'] in publications:raise ValueError('publication original ordinal/record duplicated')
             ordinal+=1
-            if mapping is not None and row['source_mapping_sha256']!=digest(mapping):raise ValueError('accepted record changed original source mapping')
-            if capture is not None:
-                for cap in row['capture_refs']:_capture(cap,d['source_manifest'],mapping,flags,times,before=row['published_monotonic_ns'])
-            if mapping is not None and source_mappings:_publication_source(row,record,d,execution,mapping,source_mappings)
+            if mapping_sha is not None and row['source_mapping_sha256']!=mapping_sha:raise ValueError('accepted record changed original source mapping')
+            if terminal is not None:
+                for cap in row['capture_refs']:_capture_prefix(cap,d['source_manifest'],mapping_sha,flags,times,before=row['published_monotonic_ns'])
+            if terminal is not None:_publication_source(row,record,d,execution,mapping,source_mappings,mapping_sha=mapping_sha)
             if row['operation_instance'] is not None:
                 op=operations.get(row['operation_instance'])
                 if index is not None and (op is None or op['binding_index']!=row['binding_index'] or op['outcome']!='ok' or
