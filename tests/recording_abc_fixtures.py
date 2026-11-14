@@ -51,7 +51,8 @@ def installed_dependencies():
 def build_runtime_fixture(root, *, count=24, duration_ns=700_000_000,
                           tasks_per_recording=1, phase_ns=500_000_000,
                           fixture_delay_ms=0, dependency_evidence=None,
-                          include_audio=False, vision_delay_ms=0):
+                          include_audio=False, vision_delay_ms=0, include_fill=False,
+                          task_snapshot_ns=None):
     """Freeze balanced recording arms and actual files before any execution.
 
     Defaults yield one1Hz tick at500ms and a task snapshot at600ms. A phase0
@@ -72,6 +73,7 @@ def build_runtime_fixture(root, *, count=24, duration_ns=700_000_000,
         raise ValueError('bounded explicit synthetic callback delay required')
     if type(include_audio) is not bool or type(vision_delay_ms) is not int or not 0 <= vision_delay_ms <= 500:
         raise ValueError('explicit audio selection and bounded vision delay required')
+    if type(include_fill) is not bool:raise ValueError('explicit fill selection required')
     root = Path(root).absolute()
     if root.is_symlink() or not root.is_dir() or any(root.iterdir()):
         raise ValueError('empty caller-owned existing directory required')
@@ -90,6 +92,19 @@ def build_runtime_fixture(root, *, count=24, duration_ns=700_000_000,
     u['recordings'] = []
     for arm in u['arms']:
         arm['recording_policies'] = []
+    fill_config=None
+    if include_fill:
+        from humansense.providers.fill import _configuration
+        from humansense.fill_conflict_rule import RULE_SHA,PREDICATE
+        fill_config=_configuration(width=64,height=64,roi=[8,8,56,56],
+            hsv_lower=[110,100,100],hsv_upper=[130,255,255],volume_curve_ml=[[0,0],[1,100]],
+            calibration_id='cal1',container_id='cup1',coordinate_frame='pixels')
+        c=u['arms'][2]
+        controller=deepcopy(c['controllers'][0]);controller['controller_id']='fill'
+        controller['policy']['cooldown_ms']=0;c['controllers'].append(controller)
+        for lid,role in (('fill_small','fill_small'),('fill_strong','fill_strong')):
+            c['lanes'].append(dict(lane_id=lid,role=role,adapter_id='fixture',controller_id='fill',
+                maximum_charge=5,ttl_ms=1000,binding_id=lid))
     question = 'Describe the observed synthetic pixels; do not infer model accuracy.'
     prompt = dict(schema_version=1, kind='recording_visual_prompt', question=question)
     provider_config = dict(delay_ms=vision_delay_ms)
@@ -97,6 +112,10 @@ def build_runtime_fixture(root, *, count=24, duration_ns=700_000_000,
                   max_calls=256, max_inflight=4, receipt_limit=128)
     bundles = {}; crows = []; payloads = {}
     snapshot_ns = max(phase_ns + 50_000_000, duration_ns - 100_000_000)
+    if task_snapshot_ns is not None:
+        if type(task_snapshot_ns) is not int or not 0<=task_snapshot_ns<duration_ns:
+            raise ValueError('explicit original snapshot must be within recording')
+        snapshot_ns=task_snapshot_ns
     if snapshot_ns >= duration_ns:
         raise ValueError('fixture needs snapshot after tick and before recording end')
     for n in range(count):
@@ -104,17 +123,20 @@ def build_runtime_fixture(root, *, count=24, duration_ns=700_000_000,
         manifest = deepcopy(base['manifest'])
         manifest.update(recording_id=rid, duration_ns=duration_ns)
         manifest['availability'][0]['intervals'][0]['end_ns'] = duration_ns
+        if include_fill:manifest['sources'][0]['calibration_id']='cal1'
         # Three real captures include a brief event before the periodic tick.
         # Capture identities and immutable bytes are unique original inputs.
         offsets = sorted(set((0, duration_ns // 4, duration_ns // 2)))
         manifest['records'] = []
         for j, offset in enumerate(offsets):
             data = bytes(((n + j) % 256, (n + 2*j) % 256, (n + 3*j) % 256)) * (32*32)
+            if include_fill:data=bytes(64*32*3)+bytes((255,0,0))*(64*32)
             path = f'frame-{j}.bin'; payloads[f'recordings/{n:02}/payload/{path}'] = data
             manifest['records'].append(dict(source_id='camera', sensor_id='video', sequence=j+1,
                 capture_ns=manifest['origin_capture_ns']+offset, offset_ns=offset,
                 format='bgr8_hwc', stream_epoch='old', payload_path=path,
-                payload_bytes=len(data), payload_sha256=hashlib.sha256(data).hexdigest(), shape=[32,32,3]))
+                payload_bytes=len(data), payload_sha256=hashlib.sha256(data).hexdigest(),
+                shape=[64,64,3] if include_fill else [32,32,3]))
         if include_audio:
             manifest['sources'].append(dict(source_id='mic',sensor_id='microphone',stream_epoch='old',
                 format='pcm_s16le_mono',modality='audio',calibration_id=None))
@@ -150,6 +172,13 @@ def build_runtime_fixture(root, *, count=24, duration_ns=700_000_000,
                     config_sha256=digest({}),binding_id='audio'))
             if policy['periodic'] is not None:
                 policy['periodic'].update(phase_ns=phase_ns, prompt_policy_sha256=digest(prompt))
+            if include_fill and name=='C':
+                policy['fill_chain']=dict(implementation='fill_conflict_v1',source_id='camera',
+                    selection_period_ns=duration_ns+1,phase_ns=phase_ns,max_lateness_ns=50_000_000,
+                    fill_config_sha256=digest(fill_config),rule_sha256=RULE_SHA,
+                    small_lane_id='fill_small',strong_lane_id='fill_strong',strong_opt_in=True,
+                    charge_ceilings=dict(initial=5,reinspection=5,strong=5),chain_ceiling=15,
+                    pricing_revision='1',unit='fixture',stage_timeout_ms=1000,retention_ms=5000)
             arm['recording_policies'].append(policy)
             profile_arms.append(dict(arm=name, deliveries=deepcopy(policy['deliveries'])))
             for controller in arm['controllers']:
@@ -160,6 +189,7 @@ def build_runtime_fixture(root, *, count=24, duration_ns=700_000_000,
         declaration = deepcopy(policy_fixture()[0]['recordings'][0])
         declaration.update(recording_id=rid, source_manifest_sha256=digest(manifest),
                            tasks_sha256=digest(tasks), profiles_sha256=digest(profiles))
+        if include_fill:declaration['source_bindings'][0]['coordinate_frame']='pixels'
         if include_audio:
             declaration['source_bindings'].append(dict(source_id='mic',coordinate_frame=None,channels=None))
         u['recordings'].append(declaration)
@@ -176,10 +206,15 @@ def build_runtime_fixture(root, *, count=24, duration_ns=700_000_000,
         calls = [('answer', tasks_per_recording)]
         if inv['arm'] != 'B':
             calls.append(('periodic', len(range(phase_ns, duration_ns, 10**9))))
+        if include_fill and inv['arm']=='C':calls.extend((('fill_small',2),('fill_strong',1)))
         for lane, maximum in calls:
             for ordinal in range(maximum):
+                text='Synthetic pixel fixture observation.'
+                if lane in ('fill_small','fill_strong'):
+                    text=encoded(dict(schema_version=1,predicate=PREDICATE,status='estimated',
+                                      interval=[.48,.52] if lane=='fill_strong' else [.1,.2])).decode()
                 responses['rows'].append(dict(invocation_ordinal=inv['ordinal'], lane_id=lane,
-                    call_ordinal=ordinal, text='Synthetic pixel fixture observation.',
+                    call_ordinal=ordinal, text=text,
                     usage=None, synthetic_receipt_sha256=None))
     adapter = u['adapters'][0]
     adapter.update(implementation_sha256=hashlib.sha256(Path(recording_transports.__file__).read_bytes()).hexdigest(),
@@ -198,7 +233,7 @@ def build_runtime_fixture(root, *, count=24, duration_ns=700_000_000,
         bindings = []
         for ordinal, lane in enumerate(arm['lanes']):
             bindings.append(dict(binding_id=lane['binding_id'], provider=adapter['provider'],
-                model_revision=adapter['model_revision'], role='text_llm' if lane['role']=='text_answer' else 'small_vlm',
+                model_revision=adapter['model_revision'], role='text_llm' if lane['role']=='text_answer' else 'strong_vlm' if lane['role']=='fill_strong' else 'small_vlm',
                 config_sha256=digest(adapter['config']), source_ids=['camera','mic'] if include_audio else ['camera'],
                 entry_boundary='async_client_callback', operation_kinds=['semantic'], semantic_lane=ordinal))
         if arm['arm'] != 'A':
@@ -209,6 +244,12 @@ def build_runtime_fixture(root, *, count=24, duration_ns=700_000_000,
             bindings.append(dict(binding_id='audio',provider=PCMLevel.spec.provider,
                 model_revision=PCMLevel.spec.version,role='signal',config_sha256=digest({}),
                 source_ids=['mic'],entry_boundary='in_process_backend',operation_kinds=['process'],semantic_lane=None))
+        if include_fill and arm['arm']=='C':
+            from humansense.providers.fill import CalibratedColorFill
+            fill_spec=CalibratedColorFill.capability(**fill_config)
+            bindings.append(dict(binding_id='fill_measurement',provider=fill_spec.provider,
+                model_revision=fill_spec.version,role='signal',config_sha256=digest(fill_config),
+                source_ids=['camera'],entry_boundary='in_process_backend',operation_kinds=['process'],semantic_lane=None))
         collection['arms'].append(dict(arm=arm['arm'], config_sha256=digest(plan['systems'][arm['arm']]),
                                        provider_bindings=bindings))
     scopes = []
@@ -228,6 +269,7 @@ def build_runtime_fixture(root, *, count=24, duration_ns=700_000_000,
     documents = {'configurations/000.json':provider_config, 'configurations/001.json':prompt, 'responses/000.json':responses,
                  'budgets/000.json':budget}
     if include_audio:documents['configurations/002.json']={}
+    if include_fill:documents['configurations/003.json']=fill_config
     def ref(path, value):
         data = encoded(value)+b'\n'
         return dict(path=path, file_sha256=hashlib.sha256(data).hexdigest(), bytes=len(data))
@@ -242,6 +284,10 @@ def build_runtime_fixture(root, *, count=24, duration_ns=700_000_000,
     if include_audio:
         r=ref('configurations/002.json',{})
         assets['assets'].append(dict(asset_id='audio-config',kind='provider_config',path=r['path'],
+                                    sha256=r['file_sha256'],bytes=r['bytes']))
+    if include_fill:
+        r=ref('configurations/003.json',fill_config)
+        assets['assets'].append(dict(asset_id='fill-config',kind='provider_config',path=r['path'],
                                     sha256=r['file_sha256'],bytes=r['bytes']))
     documents.update({'runtime/'+name+'.json':value for name,value in dict(policy=u, plan=plan,
         latency=latency, collection=collection, scopes=q, instrumentation=i, assets=assets).items()})
