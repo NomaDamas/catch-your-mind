@@ -234,7 +234,7 @@ class ParentNativeChannel:
         self.budget.bind_collection(self.preflight['collection_sha256'],self.preflight['parent_budget_precharge'])
         self.parent,self.child=socket.socketpair();self.parent.setblocking(False);self.child.set_inheritable(False)
         self.hello=False;self.eof=False;self.reason=None;self.terminal=None;self.validated_index=None
-        self.parent_reaped=False;self.returncode=None;self.sequence=0;self.received=0;self._process=None
+        self.parent_reaped=False;self.returncode=None;self.sequence=0;self.received=0;self.bootstrap_sent_bytes=0;self._process=None
         self._directory_fd=None;self._fd=None;self._source_fd=None;self._chunk=None;self._source=None
         self._chunks=[];self._pages=[];self._counters=[];self._sources={};self._receipts={};self._claims={}
         self._native_sequence=0;self._native_previous=digest(['gamst.recording.events.v1',self.context]);self._native_time=0
@@ -483,7 +483,9 @@ class ParentNativeChannel:
             loaded=await self._thread(self._load_original_declarations)
             if encoded(loaded)!=encoded(self.declarations):raise ValueError('parent frozen snapshot differs')
             limit=min(self.bootstrap['deadline_ns'],time.monotonic_ns()+self.declarations['instrumentation_protocol']['hello_timeout_ms']*1000000)
-            await _deadline(asyncio.get_running_loop().sock_sendall(self.parent,frame(self.bootstrap)),limit)
+            bootstrap_frame=frame(self.bootstrap)
+            await _deadline(asyncio.get_running_loop().sock_sendall(self.parent,bootstrap_frame),limit)
+            self.bootstrap_sent_bytes=len(bootstrap_frame)
             hello=await _deadline(receive(self.parent,consume=self._consume),limit)
             if hello!=_hello(self.bootstrap) or type(hello.get('schema_version')) is not int:
                 raise ValueError('native hello identity mismatch')

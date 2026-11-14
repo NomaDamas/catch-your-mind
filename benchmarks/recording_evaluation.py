@@ -262,6 +262,25 @@ class RecordingEvaluationSession(RecordingScopeOwner):
         if request_sha256!=expected: raise ValueError('source request descriptor hash differs')
         return self._admit(evaluation_scope,operation_kind,request_sha256,evidence_sha256,refs=refs)
 
+    def semantic_entry_for_decision(self,binding_index,decision_sha256):
+        """Resolve one exact actual semantic entry, never an ambient latest call."""
+        from humansense.native_entry import _issue_entry_binding
+        integer(binding_index,0,len(self._bindings)-1);sha(decision_sha256)
+        with self._lock:
+            matches=[]
+            for ei in range(self._entries):
+                row=struct.unpack_from('<IIIIQII32s32s32s',self._entry_table,ei*128)
+                if row[2]!=binding_index or row[8].hex()!=decision_sha256:continue
+                if row[9]==b'\0'*32:raise ValueError('semantic prompt identity required')
+                scope=self._handle(row[1],row[2]);binding=self._binding(scope)
+                matches.append(_issue_entry_binding(dict(schema_version=1,owner_kind='recording_native4',
+                    owner=self.binding_owner(scope),entry=dict(ticket_ordinal=row[0],entry_ordinal=ei,
+                        instance_sha256=digest(['gamst.recording.instance.v1',self.context['nonce'],ei]),
+                        request_decision_sha256=row[8].hex(),entered_event_sha256=self._entry_digests[ei*32:(ei+1)*32].hex()),
+                    provider=binding['provider'],model_revision=binding['model_revision'],role=binding['role'],prompt_sha256=row[9].hex())))
+            if len(matches)>1:raise ValueError('ambiguous original decision entry')
+            return matches[0] if matches else None
+
     def operation_reference(self,entry_binding):
         """Resolve an original actual semantic binding without ambient last-call state."""
         from humansense.native_entry import NativeEntryBinding

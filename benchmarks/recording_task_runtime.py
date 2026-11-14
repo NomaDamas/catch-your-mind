@@ -332,7 +332,7 @@ class RecordingTaskRuntime:
         ref=await self._write_task(n,'result',result)
         state['done']=True;state['result']=ref;self._results[n]=ref;self._result_values[n]=result;self._changed.set()
         try:
-            response=self._answer_ready(task['task_id'],ref,digest(result))
+            response=self._answer_ready(task['task_id'],ref,ref['file_sha256'])
             if not inspect.isawaitable(response):raise TypeError('async sealed result callback required')
             await response
         except BaseException as error:raise _TransportFailed('sealed task result delivery failed') from error
