@@ -172,6 +172,13 @@ def validate_collection(collection, plan):
 
 
 def validate_recording_scope_protocol(declarations):
+    """Legacy Q1/I2 entrypoint deliberately rejects runtime profiles2."""
+    return _validate_scope_protocol_common(declarations)
+
+
+def _validate_scope_protocol_common(declarations, *, runtime_profiles=False):
+    # Only the separately validated built-in runtime entrypoint selects the new
+    # profile grammar. No public validator callback or acceptance switch exists.
     d=snapshot(declarations)
     required={'plan','collection','scope_protocol','instrumentation_protocol','source_manifest','tasks','profiles'}
     optional={'runtime_policy','stream_protocol','allocation_protocol','cost_card'}
@@ -215,7 +222,17 @@ def validate_recording_scope_protocol(declarations):
     if i['fd_environment_key']!='GAMST_RECORDING_FD_V2': raise ValueError('recording channel2 FD required')
     source=validate_manifest(d['source_manifest']); original_tasks=validate_tasks(d['tasks'],source['duration_ns'])
     sequence(source['sources'],16,1)
-    validate_frozen_profiles(source,d['profiles'])
+    if runtime_profiles:
+        from .recording_runtime_contract import validate_profiles_v2
+        if 'runtime_policy' not in d:raise ValueError('runtime profiles require bound U declaration')
+        policies={}
+        for arm in d['runtime_policy']['arms']:
+            matches=[p for p in arm['recording_policies'] if p['recording_id']==source['recording_id']]
+            if len(matches)!=1:raise ValueError('one original runtime recording policy required')
+            policies[arm['arm']]=matches[0]
+        validate_profiles_v2(d['profiles'],source,policies)
+    else:
+        validate_frozen_profiles(source,d['profiles'])
     matches=[r for r in c['recordings'] if r['recording_id']==source['recording_id']]
     if len(matches)!=1: raise ValueError('source must belong to frozen recording')
     recording=matches[0]
