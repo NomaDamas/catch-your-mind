@@ -25,7 +25,7 @@ class FillRuntime(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory(dir='.') as temporary:
             root=Path(temporary).resolve();(root/'inputs').mkdir()
             f=build_runtime_fixture(root/'inputs',count=24,duration_ns=2_000_000_000,
-                task_snapshot_ns=1_500_000_000,include_fill=True,dependency_evidence=self.dependencies)
+                task_snapshot_ns=1_500_000_000,phase_ns=750_000_000,include_fill=True,dependency_evidence=self.dependencies)
             preflight=preflight_runtime_collection([f.declarations(n) for n in range(24)],
                 latency_policy=f.documents['runtime/latency.json'],source_bundles=f.source_bundles)
             self.assertLess(preflight['predicted_artifact_bytes'],4*1024**3)
