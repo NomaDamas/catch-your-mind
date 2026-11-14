@@ -33,11 +33,12 @@ class SnapshotContext(unittest.IsolatedAsyncioTestCase):
             await adapter.close()
         await self.h.close()
 
-    async def snapshot(self, task):
+    async def snapshot(self, task, *, publisher=None):
+        publisher = publisher or self.publisher
         begin = time.monotonic_ns()
-        context = await self.h.get_context(context_view=self.view)
+        context = await self.h.get_context(publisher.subject_id, context_view=publisher.context_view)
         end = time.monotonic_ns()
-        return await self.publisher.publish(dict(
+        return await publisher.publish(dict(
             kind='frozen_context_bundle_not_new_sensor_measurement', task_id=task,
             input_sha256=_digest({'question': 'What is the fill?'}), task_sha256='a'*64,
             source_manifest_sha256='b'*64, mapping_sha256='c'*64,
@@ -157,8 +158,26 @@ class SnapshotContext(unittest.IsolatedAsyncioTestCase):
                     await human.get_context(context_view=publisher.context_view)
                 with self.assertRaises((RuntimeError, PermissionError)):
                     await human.get_trends(context_view=publisher.context_view)
+                self.assertEqual(human._evaluation_snapshot_publishers, {})
+                self.assertIsNone(publisher.subject_id)
+                self.assertEqual(publisher._task_ids, set())
             finally:
                 await human.close()
+
+    async def test_deleted_subjects_do_not_exhaust_active_registry_or_retain_task_ids(self):
+        old_views = []
+        for i in range(20):
+            subject = 'private-subject-' + str(i)
+            publisher = self.h.create_evaluation_snapshot_publisher(subject,
+                implementation_sha256=evaluation_snapshot_implementation_sha256())
+            await self.snapshot('private-task-' + str(i), publisher=publisher)
+            old_views.append(publisher.context_view)
+            await self.h.delete_data(subject)
+            self.assertNotIn(subject, self.h._evaluation_snapshot_publishers)
+            self.assertIsNone(publisher.subject_id)
+            self.assertFalse(publisher._task_ids)
+        for view in old_views:
+            with self.assertRaises(RuntimeError): await self.h.get_context(context_view=view)
 
 
 if __name__ == '__main__':

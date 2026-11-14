@@ -110,11 +110,21 @@ class EvaluationSnapshotPublisher:
         return self._capability_sha256
 
     def _check(self):
+        if self._human is None:
+            raise RuntimeError('evaluation snapshot publisher was retired')
         self._human._check()
         if (self._session_id != self._human._session_id
                 or self._generation != self._human._generation
                 or self._human._evaluation_snapshot_publishers.get(self.subject_id) is not self):
             raise RuntimeError('evaluation snapshot publisher was invalidated')
+
+    def _retire(self):
+        # Privacy invalidation is synchronous, including before async cleanup.
+        # Externally retained old views remain permanently unusable and do not
+        # retain subject IDs, original task IDs or the owning HumanSense graph.
+        self._task_ids.clear()
+        self._subject_id = self._session_id = self._generation = self._human = None
+        self._sequence = self._bytes = 0
 
     async def publish(self, envelope):
         self._check()

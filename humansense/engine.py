@@ -95,6 +95,12 @@ class HumanSense:
             try:observer.invalidate(reason, subject_id=subject_id)
             except BaseException:pass
 
+    def _retire_evaluation_snapshot_publishers(self):
+        publishers = getattr(self, '_evaluation_snapshot_publishers', {})
+        for publisher in publishers.values():
+            publisher._retire()
+        publishers.clear()
+
     def enable_separation_media(self, *, subject_id='local-user', source_id, sensor_id,
                                 ttl_ms=30000, capacity=8, max_bytes=16*1024*1024,
                                 visual_source=None):
@@ -130,6 +136,7 @@ class HumanSense:
         prior = getattr(self, '_consent', False)
         self._consent = value
         if prior and not value:
+            self._retire_evaluation_snapshot_publishers()
             self._invalidate_evaluation("consent_revoked")
             self._generation += 1
             self._invalidate_call_drivers('consent_revoked')
@@ -955,6 +962,7 @@ class HumanSense:
                 "records": await self.get_history(subject_id, start_ms=start_ms, end_ms=end_ms, limit=100_000)}
 
     async def pause(self):
+        self._retire_evaluation_snapshot_publishers()
         self._invalidate_evaluation("pause")
         self.paused = True
         self._analysis_results.clear()
@@ -973,6 +981,9 @@ class HumanSense:
         return {"paused": False}
 
     async def delete_data(self, subject_id=None):
+        # Deletion resets the global processing generation, so every issued
+        # publisher is retired before any owned asynchronous cleanup can run.
+        self._retire_evaluation_snapshot_publishers()
         self._invalidate_evaluation("delete", subject_id)
         from .streams import _finish
         self._invalidate_call_drivers('delete',reject_self_join=True)
@@ -1067,6 +1078,7 @@ class HumanSense:
 
     async def reset_processing(self):
         """Discard pending media results and model buffers without pausing text."""
+        self._retire_evaluation_snapshot_publishers()
         self._invalidate_evaluation("reset")
         self._generation += 1
         self._invalidate_call_drivers('reset',reject_self_join=True)
@@ -1077,6 +1089,7 @@ class HumanSense:
     async def close(self):
         from .streams import _finish
         self._invalidate_call_drivers('close',reject_self_join=True)
+        self._retire_evaluation_snapshot_publishers()
         task = getattr(self, '_close_task', None)
         if task is None:
             self._invalidate_evaluation("close")
