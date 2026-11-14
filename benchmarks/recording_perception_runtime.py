@@ -123,7 +123,7 @@ class RecordingPerceptionRuntime:
         finally:
             # These objects retain the original actual entry only until its
             # publication/export reservation; never fabricate a replacement.
-            
+
             if lane['completion'].entry_for_decision(sha) is not None:lane['completion'].release_entry(sha)
             if not self.smol:lane['completion'].release_capture(sha)
 
@@ -228,7 +228,7 @@ class _FillContext(FillEvaluationContext):
                 predecessor_instance=None if previous is None else previous.snapshot()['entry']['instance_sha256'],
                 status='failed' if error or response is None else 'completed'))
         if entry is not None:self.last_entry=entry;self.last_operation=operation
-        
+
         if entry is not None:lane['completion'].release_entry(decision)
         lane['completion'].release_capture(decision);self.pending=None
     def completed(self,case,record):self.case=case
