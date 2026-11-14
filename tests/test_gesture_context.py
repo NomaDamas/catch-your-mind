@@ -148,6 +148,7 @@ importlib.metadata.version=lambda name:'0.10.35'
 from humansense.provider_worker import main
 main()
 '''
+        code = 'import sys; sys.path.insert(0, '+repr(str(Path(__file__).resolve().parent))+')\n'+code
         real_spawn=asyncio.create_subprocess_exec; children=[]
         async def spawn(*args,**kwargs):
             child=await real_spawn(args[0],'-u','-c',code,**kwargs); children.append(child); return child
