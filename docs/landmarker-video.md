@@ -19,6 +19,9 @@ Profiles: `mediapipe.body.video`, `mediapipe.hand.video`, `mediapipe.face.video`
 The separate [gesture profile](gesture-context.md), `mediapipe.gesture.video`,
 reuses this lifecycle with `GestureRecognizer.recognize_for_video` and a distinct
 `vision.hand_gestures` output; it does not reinterpret hand geometry as gestures.
+The separate [head-orientation profile](head-orientation.md),
+`mediapipe.head_orientation.video`, adds explicit camera/3D-model PnP geometry to
+the face VIDEO lifecycle without assuming default camera or anatomical geometry.
 `max_entities` is 1..4 (default 4); `max_gap_ms` is 1..60000 (default 1000).
 Discovery is dependency-light and starts no model. The descriptor is `native`,
 stateful and reset-on-gap; its ID differs from the IMAGE-mode provider. It retains

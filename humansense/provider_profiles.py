@@ -9,6 +9,9 @@ def capability(profile, config):
     if profile == 'rfdetr.tennis_image':
         from .providers.tennis_image import TennisImageTask
         return TennisImageTask.capability(config)
+    if profile == 'mediapipe.head_orientation.video':
+        from .providers.head_orientation import HeadOrientationContext
+        return HeadOrientationContext.capability(**config)
     if profile == 'pg.physical.local':
         from .pg_physical_process import capability as pg_capability
         return pg_capability(config)

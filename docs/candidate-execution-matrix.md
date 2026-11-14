@@ -120,10 +120,13 @@ inputs; process isolation is not an OS sandbox. No installer is run by this matr
     intent or commands; real task compatibility/accuracy remains pending.
     [#83](https://github.com/NomaDamas/Gamst/issues/83),
     [#20](https://github.com/NomaDamas/Gamst/issues/20).
-13. **MediaPipe face — implemented IMAGE/VIDEO landmarks and blendshapes.**
-    `mediapipe.face`/`.video`; [face contract](face-context.md), `test_face_context`,
-    `test_landmarker_video`. Code Apache-2.0; task weights separate. No verified
-    emotion or calibrated head-orientation claim;
+13. **MediaPipe face — implemented IMAGE/VIDEO landmarks, blendshapes and explicit-geometry head orientation.**
+    `mediapipe.face`/`.video`, `mediapipe.head_orientation.video`;
+    [face contract](face-context.md), [orientation contract](head-orientation.md),
+    `test_face_context`, `test_landmarker_video`, `test_head_orientation`.
+    Code Apache-2.0; task weights separate. Head rotation uses declared camera
+    calibration/3D geometry and real OpenCV PnP numerical tests; no default
+    anthropometry, inferred emotion or verified human pose-accuracy claim;
     [#85](https://github.com/NomaDamas/Gamst/issues/85),
     [#20](https://github.com/NomaDamas/Gamst/issues/20).
 14. **RTMPose — not integrated.** No RTMPose checkpoint, runtime or validation
@@ -132,7 +135,8 @@ inputs; process isolation is not an OS sandbox. No installer is run by this matr
 15. **L2CS-Net — implemented CPU gaze candidate.** `l2cs.gaze`, `gaze` extra;
     [contract](gaze-context.md), `test_gaze`. L2CS code MIT and MediaPipe
     Apache-2.0; gaze/face weights and data terms separate. Gaze geometry does not
-    prove camera-calibrated head pose; real crop/parity/convention gate
+    prove camera-calibrated head pose; the separate explicit-geometry PnP profile
+    is documented above. Real crop/parity/convention gate
     [#93](https://github.com/NomaDamas/Gamst/issues/93).
 16. **OpenCV Lucas-Kanade and Farneback — both implemented numerical paths.**
     `opencv.flow`, `vision` extra, CPU; [contract](vision-motion.md),
