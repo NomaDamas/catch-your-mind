@@ -25,9 +25,10 @@ from recording_native_fixtures import rehash
 from test_recording_runtime_native import runtime_declarations
 
 
-def originals(snapshots,*,delay_ms=0,queue=64,deadline_ns=1_900_000_000,parallel=False):
+def originals(snapshots,*,delay_ms=0,queue=64,deadline_ns=1_900_000_000,parallel=False,answer_text=None):
     d,l,bundles=runtime_declarations();u=d['runtime_policy'];p=d['plan'];source=d['source_manifest']
-    source['duration_ns']=2_000_000_000;source['availability'][0]['intervals'][0]['end_ns']=2_000_000_000
+    duration=max(2_000_000_000,max(deadline_ns) + 100_000_000 if isinstance(deadline_ns,list) else deadline_ns+100_000_000)
+    source['duration_ns']=duration;source['availability'][0]['intervals'][0]['end_ns']=duration
     prototype=deepcopy(p['comparison']['tasks'][0]);p['comparison']['tasks']=[];tasks=[]
     for n,snapshot in enumerate(snapshots):
         question=dict(question='Question '+str(n));original=deepcopy(prototype);original.update(id='task'+str(n),input_sha256=digest(question))
@@ -37,7 +38,7 @@ def originals(snapshots,*,delay_ms=0,queue=64,deadline_ns=1_900_000_000,parallel
     d['tasks']=tasks;l['comparison_plan_sha256']=digest(p)
     profiles=d['profiles'];profiles['source_manifest_sha256']=digest(source)
     responses=dict(schema_version=1,kind='fixture_completions',rows=[dict(invocation_ordinal=0,lane_id='answer',
-        call_ordinal=n,text='Answer '+str(n),usage=None,synthetic_receipt_sha256=None) for n in range(len(tasks))])
+        call_ordinal=n,text='Answer '+str(n) if answer_text is None else answer_text,usage=None,synthetic_receipt_sha256=None) for n in range(len(tasks))])
     if parallel:
         responses['rows'].extend([dict(row,lane_id='answer2') for row in list(responses['rows'])])
         for arm in u['arms']:
@@ -125,7 +126,7 @@ class TaskRuntime(unittest.IsolatedAsyncioTestCase):
 
     async def test_eight_sequential_answers_and_overlapping_windows_preserve_original_context(self):
         runtime,human,controller,client,adapter,owner,native,artifacts,receipts=await self.setup_runtime(
-            [100_000_000+n*50_000_000 for n in range(8)]+[600_000_000,600_000_000],delay_ms=5)
+            [100_000_000+n*1_200_000_000 for n in range(8)]+[10_000_000_000,10_000_000_000],delay_ms=5,deadline_ns=12_000_000_000)
         await runtime.run();self.assertEqual(len(receipts),10)
         self.assertTrue(all(result['status']=='answer' for result in runtime.result_values),runtime.result_values)
         contexts=[]
@@ -147,6 +148,16 @@ class TaskRuntime(unittest.IsolatedAsyncioTestCase):
             latency_policy=runtime._test_latency_policy,
             source_bundles={'original':dict(manifest=runtime.manifest,tasks=runtime.tasks,profiles=owner.declarations['profiles'])})
         self.assertEqual(index.count,10)
+
+    async def test_accepted_sdk_response_with_escaped_text_retains_exact_bounded_sidecar(self):
+        text='\x01'*8191+'X'
+        runtime,human,controller,client,adapter,owner,native,artifacts,receipts=await self.setup_runtime(
+            [100_000_000],answer_text=text)
+        await runtime.run();self.assertEqual(runtime.result_values[0]['status'],'answer')
+        path=artifacts.output/'requests/request-000000.json'
+        raw=path.read_bytes();self.assertGreater(len(raw),32768);self.assertLessEqual(len(raw),65536)
+        response=json.loads(raw);self.assertEqual(response['sdk_result']['text'],text)
+        self.assertEqual(response['native_raw_result_sha256'],digest(dict(text=text,usage=None)))
 
     async def test_bounded_waiting_queue_refuses_without_refresh_or_hidden_call(self):
         runtime,human,controller,client,adapter,owner,native,artifacts,receipts=await self.setup_runtime(
@@ -192,8 +203,12 @@ class TaskRuntime(unittest.IsolatedAsyncioTestCase):
 
     async def test_deadline_cancels_and_joins_actual_call_retains_unknown_liability(self):
         runtime,human,controller,client,adapter,owner,native,artifacts,receipts=await self.setup_runtime(
-            [100_000_000],delay_ms=500,deadline_ns=200_000_000)
-        await runtime.run();result=runtime.result_values[0]
+            [100_000_000],deadline_ns=1_500_000_000)
+        entered=asyncio.Event()
+        async def held(*args):
+            entered.set();await asyncio.Event().wait()
+        client._invoke=held
+        await runtime.run();self.assertTrue(entered.is_set());result=runtime.result_values[0]
         self.assertEqual(result['reason'],'timeout');self.assertIsNone(result['answer_text']);self.assertTrue(result['cleanup_finished'])
         evidence=read_ref(artifacts.output,result['evidence']);self.assertIsNotNone(evidence['operation_instance'])
         self.assertEqual(controller.snapshot()['budget']['reserved_liability'],10)

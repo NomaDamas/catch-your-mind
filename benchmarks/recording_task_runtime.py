@@ -269,7 +269,7 @@ class RecordingTaskRuntime:
             except BaseException:
                 if not call.done():call.cancel()
                 await _finish(asyncio.gather(call,return_exceptions=True));raise
-            if result.get('accepted') is True:state['sdk_result']=bounded_json(result,max_bytes=32768)
+            if result.get('accepted') is True:state['sdk_result']=bounded_json(result,max_bytes=65536)
             if not result.get('accepted'):reason='admission_refused';return
             if self._now()>self._deadline(n):reason='timeout';return
             entry=lane.completion.entry_for_decision(decision_sha)
@@ -334,7 +334,9 @@ class RecordingTaskRuntime:
                 task_id=task['task_id'],input_sha256=task['input_sha256'],scope_index=n+1,
                 operation_instance=entry.snapshot()['entry']['instance_sha256'],
                 native_raw_result_sha256=digest(dict(text=sdk_result['text'],usage=sdk_result['usage'])),sdk_result=sdk_result)
-            try:await self.artifacts.write_request(n,response)
+            try:
+                if len(encoded(response))+1>65536:raise ValueError('actual SDK response sidecar exceeds64KiB')
+                await self.artifacts.write_request(n,response)
             except Exception as error:raise _WriterFailed('actual SDK response evidence write failed') from error
         if reason=='completed' and time.monotonic_ns()>=self._deadline(n):reason='timeout';answer=None;operation=None
         status='answer' if reason=='completed' else 'failed'
