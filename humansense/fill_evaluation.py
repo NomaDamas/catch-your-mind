@@ -24,5 +24,8 @@ class FillEvaluationContext(ABC):
     def stage_finished(self, stage, request_id, response, error):pass
     @abstractmethod
     def completed(self, case, record):pass
+    def partial(self, case, outcome):
+        """Optional detached failed/cancelled prefix before private case retirement."""
+        pass
     @abstractmethod
     def closed(self, outcome):pass

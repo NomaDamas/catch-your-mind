@@ -1,4 +1,5 @@
 """Actual OpenCV case keeps opt-in export outside rule/stage selection."""
+import asyncio
 import threading
 import unittest
 from humansense.fill_evaluation import FillEvaluationContext
@@ -14,6 +15,7 @@ class Context(FillEvaluationContext):
         return dict(evaluation_scope=None,evaluation_relationship='root',evaluation_predecessor=None)
     def stage_finished(self,stage,request_id,response,error):self.finished.append((stage,response,error))
     def completed(self,case,record):self.case=case
+    def partial(self,case,outcome):self.partial_case=case;self.partial_outcome=outcome
     def closed(self,outcome):self.outcome=outcome
 
 
@@ -41,3 +43,15 @@ class FillHooks(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError,'relationship differs'):
             await driver.inspect(fill_tests.frame(),evaluation_context=context)
         self.assertEqual(len(requests),1);self.assertEqual(context.outcome,'failed')
+
+    async def test_cancelled_actual_case_exports_detached_prefix_before_retirement(self):
+        entered=asyncio.Event()
+        async def callback(request):entered.set();await asyncio.Event().wait()
+        driver,controller,requests=self.create([],callback=callback)
+        context=Context();job=asyncio.create_task(driver.inspect(fill_tests.frame(),evaluation_context=context))
+        await asyncio.wait_for(entered.wait(),5);job.cancel()
+        with self.assertRaises(asyncio.CancelledError):await job
+        self.assertEqual(context.partial_outcome,'cancelled')
+        self.assertEqual(context.partial_case['stage'],'initial')
+        self.assertEqual(len(context.partial_case['attempts']),1)
+        self.assertIsNone(driver.snapshot()['active'])

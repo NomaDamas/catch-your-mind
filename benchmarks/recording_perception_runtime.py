@@ -118,21 +118,26 @@ class RecordingPerceptionRuntime:
             lane['completion'].release_capture(sha)
 
     async def _attempt(self,kind,opportunity,packet,lane,row):
+        context=None
         try:
             if kind=='periodic':
                 rid,instance,outcome=await self._periodic(packet,lane)
                 row.update(request_id=rid,operation_instance=instance,outcome=outcome)
             else:
-                context=_FillContext(self,packet)
+                context=_FillContext(self,packet,opportunity.index)
                 frame=packet_frame(packet,self.sources[packet.source_id][1],self.source_bindings[packet.source_id],subject_id=self.subject_id)
                 await self.fill_driver.inspect(frame,evaluation_context=context)
-                row['case']=await context.export()
                 row['operation_instance']=context.last_operation.instance_sha256 if context.last_operation else None
-        except asyncio.CancelledError:raise
+        except asyncio.CancelledError:
+            row['outcome']='closed';raise
         except Exception as error:
             if len(self.failures)<64:self.failures.append(type(error).__name__)
             row['outcome']='observer_refused' if isinstance(error,(ValueError,TypeError)) else 'financial_refused'
         finally:
+            if context is not None and context.case is not None and all(k in context.publications for k in ('fill_measurement','fill_descriptor')):
+                export=asyncio.create_task(context.export())
+                try:row['case']=await asyncio.shield(export)
+                except asyncio.CancelledError:row['case']=await _finish(export)
             row['observed_end_ns']=time.monotonic_ns();self.artifacts.record_tick(row)
 
     async def _schedule(self,kind,definition,source_id):
@@ -176,8 +181,8 @@ class RecordingPerceptionRuntime:
 
 
 class _FillContext(FillEvaluationContext):
-    def __init__(self,runtime,packet):
-        self.r=runtime;self.packet=packet;self.ticket=None;self.last_entry=None;self.last_operation=None
+    def __init__(self,runtime,packet,case_ordinal):
+        self.r=runtime;self.packet=packet;self.case_ordinal=case_ordinal;self.ticket=None;self.last_entry=None;self.last_operation=None
         self.publications={};self.stages=[];self.pending=None;self.case=None;self.outcome='cancelled'
     def validate(self,driver,frame):
         if driver is not self.r.fill_driver:raise ValueError('foreign fill driver')
@@ -208,7 +213,7 @@ class _FillContext(FillEvaluationContext):
         if prompt is not None:
             self.stages.append(dict(stage=stage,binding_index=lane['binding_index'],controller_request_id=rid,
                 operation_instance=None if operation is None else operation.instance_sha256,prompt_sha256=prompt,
-                raw_response_sha256=None if response is None else digest(dict(text=response['text'],usage=response['usage'])),parsed_claim_sha256=None,
+                raw_response_sha256=None if response is None or response.get('accepted') is not True else digest(dict(text=response['text'],usage=response['usage'])),parsed_claim_sha256=None,
                 rule_outcome='stage_failed' if error or response is None else 'indeterminate_claim',
                 predecessor_instance=None if previous is None else previous.snapshot()['entry']['instance_sha256'],
                 status='failed' if error or response is None else 'completed'))
@@ -217,6 +222,9 @@ class _FillContext(FillEvaluationContext):
         if entry is not None:lane['completion'].release_entry(decision)
         lane['completion'].release_capture(decision);self.pending=None
     def completed(self,case,record):self.case=case
+    def partial(self,case,outcome):
+        if self.case is None:
+            self.case=case;self.case['outcome']='cancelled' if outcome=='cancelled' else 'stage_failed'
     def closed(self,outcome):self.outcome=outcome
     async def export(self):
         if self.case is None:raise RuntimeError('no completed actual fill case')
@@ -234,4 +242,4 @@ class _FillContext(FillEvaluationContext):
             capture_ref=capture_reference(self.packet),image_sha256=case['source_sha256'],configuration_sha256=case['capture']['configuration_sha256'],
             rule_sha256=case['rule_sha256'],measurement_publication=refs['fill_measurement'],descriptor_publication=refs['fill_descriptor'],
             stages=self.stages,comparison_publication=refs.get('fill_comparison'),outcome=case['outcome'])
-        return await self.r.artifacts.write_fill_case(self.packet.record_ordinal,value)
+        return await self.r.artifacts.write_fill_case(self.case_ordinal,value)

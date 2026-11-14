@@ -39,9 +39,11 @@ def packet_frame(packet,source,binding,*,subject_id,stream_epoch=None):
 
 
 class RecordingCaptureRouter(CaptureSink):
-    def __init__(self,manifest,*,streams,source_bindings,subject_id,delivery_sources):
+    def __init__(self,manifest,*,streams,source_bindings,subject_id,delivery_sources,clock=None,artifacts=None,delivery_bindings=None):
         self.manifest=validate_manifest(manifest);self._source_sha=digest(self.manifest)
-        self.streams=streams;self.subject_id=subject_id
+        self.streams=streams;self.subject_id=subject_id;self.clock=clock;self.artifacts=artifacts
+        self._delivery_bindings={} if delivery_bindings is None else {k:tuple(v) for k,v in delivery_bindings.items()}
+        self._delivery_ordinal=0
         self.sources=self.manifest['sources'];self._bindings={b['source_id']:b for b in source_bindings}
         if set(self._bindings)!={s['source_id'] for s in self.sources}:
             raise ValueError('complete frozen original source bindings required')
@@ -55,9 +57,17 @@ class RecordingCaptureRouter(CaptureSink):
             closed_before_submit=0,last_acquired_ordinal=None,last_submitted_sequence=None) for _ in self.sources]
         self._tasks=[asyncio.create_task(self._deliver(i)) for i in range(len(self.sources)) if self.sources[i]['source_id'] in self._delivery]
 
+    def _record(self,event,packet,reason,binding=None):
+        if self.artifacts is None:return
+        self.artifacts.record_delivery(dict(delivery_ordinal=self._delivery_ordinal,event=event,
+            observed_ns=time.monotonic_ns(),source_index=packet.source_index,capture_ordinal=packet.record_ordinal,
+            binding_index=binding,reason=reason,payload_bytes=len(packet.payload),operation_instance=None,publication_ordinal=None))
+        self._delivery_ordinal+=1
+
     def offer(self,packet):
         if type(packet) is not CapturePacket:raise TypeError('owned immutable packet required')
-        if self._closed:return DeliveryAdmission(False,'closed',None)
+        if self._closed:
+            self._record('mailbox_refused',packet,'closed');return DeliveryAdmission(False,'closed',None)
         i=packet.source_index
         if not 0<=i<len(self.sources) or packet.source_id!=self.sources[i]['source_id']:
             raise ValueError('packet source outside original inventory')
@@ -72,6 +82,13 @@ class RecordingCaptureRouter(CaptureSink):
         observed=(packet.source_id,packet.sensor_id,packet.original_stream_epoch,packet.capture_sequence,
             packet.original_capture_ns,packet.offset_ns,packet.format,packet.shape,packet.sample_rate,packet.sample_count)
         if observed!=expected:raise ValueError('packet capture metadata differs from frozen original')
+        if self.clock is not None:
+            mapped=self.clock.capture(packet.offset_ns)
+            if (packet.mapping_sha256!=self.clock.sha256 or packet.sdk_timestamp_ms!=mapped['sdk_timestamp_ms']
+                    or packet.submillisecond_remainder_ns!=mapped['submillisecond_remainder_ns']
+                    or packet.scheduled_monotonic_ns!=mapped['scheduled_monotonic_ns']
+                    or packet.acquired_monotonic_ns<packet.scheduled_monotonic_ns):
+                raise ValueError('packet differs from actual replay mapping')
         stats=self._stats[i]
         if stats['last_acquired_ordinal'] is not None and packet.record_ordinal<=stats['last_acquired_ordinal']:
             raise ValueError('source acquisition ordinal repeated or regressed')
@@ -84,9 +101,11 @@ class RecordingCaptureRouter(CaptureSink):
             pending=self._pending[i]
             if pending and pending[0] is evicted:
                 pending.popleft();stats['mailbox_replaced']+=1
+                self._record('mailbox_replaced',evicted,'capacity')
         history.append(packet);stats['retained']=len(history)
         if packet.source_id in self._delivery:
             self._pending[i].append(packet);self._events[i].set()
+        self._record('mailbox_accepted',packet,'completed')
         ordinal=self._ordinal;self._ordinal+=1
         return DeliveryAdmission(True,'accepted',ordinal)
 
@@ -99,22 +118,27 @@ class RecordingCaptureRouter(CaptureSink):
                 await event.wait();event.clear()
                 while pending:
                     packet=pending.popleft()
-                    if self._closed:self._stats[i]['closed_before_submit']+=1;continue
+                    if self._closed:
+                        self._stats[i]['closed_before_submit']+=1;self._record('mailbox_refused',packet,'closed');continue
                     try:
                         frame=packet_frame(packet,source,self._bindings[packet.source_id],subject_id=self.subject_id)
                         # SensorStreams owns its delivery epoch; original epoch remains in packet+capture locator.
                         frame=replace(frame,sensor=replace(frame.sensor,stream_epoch=None))
                         result=await self.streams.submit(frame,evaluation_capture_ref=capture_reference(packet))
                         if result.get('accepted') is not True:raise RuntimeError('SDK refused recorded submission')
+                        for bi in self._delivery_bindings.get(packet.source_id,(None,)):self._record('provider_submitted',packet,'completed',bi)
                         self._stats[i]['submitted']+=1
                         self._stats[i]['last_submitted_sequence']=packet.capture_sequence
                     except asyncio.CancelledError:raise
                     except Exception as error:
+                        for bi in self._delivery_bindings.get(packet.source_id,(None,)):self._record('provider_refused',packet,'backend_error',bi)
                         self._stats[i]['submit_errors']+=1
                         if self._failure is None:self._failure=type(error).__name__
                 if self._closed:return
         finally:
-            self._stats[i]['closed_before_submit']+=len(pending);pending.clear()
+            self._stats[i]['closed_before_submit']+=len(pending)
+            for packet in pending:self._record('mailbox_refused',packet,'closed')
+            pending.clear()
 
     def watermarks(self):
         return [dict(source_index=i,last_acquired_ordinal=s['last_acquired_ordinal'],

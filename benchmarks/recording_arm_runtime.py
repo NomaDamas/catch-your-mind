@@ -137,6 +137,8 @@ class RecordingArmRuntime:
                 evaluation_bindings={spec.id:self.owner.stream_scope(bi)},evaluation_configurations={spec.id:config})
             stream=self.streams.streams[(source['source_id'],source['sensor_id'])]
             self._delivery_lanes.extend((self.manifest['sources'].index(source),bi,lane) for lane in stream['lanes'])
+        self._provider_epochs={s['source_id']:tuple(dict(capability_id=l['spec'].id,stream_epoch=l['epoch'])
+            for l in self.streams.streams.get((s['source_id'],s['sensor_id']),{}).get('lanes',())) for s in self.manifest['sources']}
         for original in self.arm['controllers']:
             controller=CallController(policy=CallPolicy(**original['policy']),budget=CallBudget(**self._document(original['budget_sha256'])),max_requests=original['max_requests'])
             self.human.register_call_controller(original['controller_id'],controller);self.controllers[original['controller_id']]=controller
@@ -187,15 +189,16 @@ class RecordingArmRuntime:
         self.mapping_ref=await self.artifacts.write_metadata('mapping',self.clock.mapping)
         self.source_mappings=[]
         for source in self.manifest['sources']:
-            stream=self.streams.streams.get((source['source_id'],source['sensor_id']))
-            epochs=[] if stream is None else [dict(capability_id=l['spec'].id,stream_epoch=l['epoch']) for l in stream['lanes']]
+            epochs=list(self._provider_epochs[source['source_id']])
             self.source_mappings.append(dict(**self.clock.mapping,mapping_sha256=self.clock.sha256,original_source=source,provider_epochs=epochs))
         self.source_mappings_ref=await self.artifacts.write_metadata('source-mappings',self.source_mappings)
         await self.journal.write_json('mapping.json',self.clock.mapping)
         await self.journal.write_json('source-mappings.json',self.source_mappings)
         await playback_started(self.mapping_ref,self.source_mappings_ref,self.clock)
         self.router=RecordingCaptureRouter(self.manifest,streams=self.streams,source_bindings=self.recording['source_bindings'],subject_id=self.recording['subject_id'],
-            delivery_sources=[d['source_id'] for d in self.policy['deliveries'] if d['profile']!='acquire_only'])
+            delivery_sources=[d['source_id'] for d in self.policy['deliveries'] if d['profile']!='acquire_only'],
+            clock=self.clock,artifacts=self.artifacts,delivery_bindings={s['source_id']:[self.binding_index[d['binding_id']]
+                for d in self.policy['deliveries'] if d['source_id']==s['source_id'] and d['profile']!='acquire_only'] for s in self.manifest['sources']})
         self.perception=RecordingPerceptionRuntime(human=self.human,owner=self.owner,clock=self.clock,manifest=self.manifest,
             subject_id=self.recording['subject_id'],source_bindings=self.recording['source_bindings'],router=self.router,policy=self.policy,
             lanes=self.lanes,artifacts=self.artifacts,prompt=None if self.policy['periodic'] is None else self._document(self.policy['periodic']['prompt_policy_sha256']),
@@ -265,7 +268,7 @@ class RecordingArmRuntime:
             counters=[] if self.source is None else self.source.counters()
             self._source_terminal=await self.journal.close(dict(state='failed' if self.failures else 'replayed_unscored',
                 failure_category=next(iter(self.failures),None),mapping_sha256=None if self.clock is None else self.clock.sha256,
-                counters=counters,terminal_reached_ns=None if self.source is None else self.source.terminal_reached_ns,
+                counters=counters,cleanup_finished_ns=self.cleanup_finished_ns,terminal_reached_ns=None if self.source is None else self.source.terminal_reached_ns,
                 router_counters=[] if self.router is None else self.router.counters()),cleanup_finished=True)
 
     async def finalize(self,native_directory):

@@ -171,7 +171,9 @@ class FillConflictRuntime:
                 row=pending.get(request_id)
                 if row is not None and row['state']!='dispatched':
                     self.controller.cancel(request_id,now_ms=timestamp())
-            if evaluation_context is not None:evaluation_context.closed(outcome)
+            if evaluation_context is not None:
+                if self._case is not None:evaluation_context.partial(bounded_json(self._case,max_bytes=16384),outcome)
+                evaluation_context.closed(outcome)
 
     async def _execute_stage(self,adapter,args,kwargs,deadline):
         # One absolute case deadline; cancellation joins the real adapter's
