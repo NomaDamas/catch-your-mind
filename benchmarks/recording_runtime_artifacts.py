@@ -16,7 +16,7 @@ import threading
 import time
 
 from .recording_artifacts import _encode, _finish, _write_all
-from .recording_native_schema import decode, digest, keys, integer, sha, identifier
+from .recording_native_schema import decode, encoded, digest, keys, integer, sha, identifier
 from .recording_native_writer import ArtifactBudget
 
 PAGE_BYTES = 65536
@@ -37,8 +37,8 @@ LIMITS = dict(ticks=16384, adapters=8, deliveries=262144,
 REASONS = ('completed','not_executed','snapshot_failed','oversize','busy','stale',
     'admission_refused','timeout','cancelled','backend_failed','source_failed',
     'clock_discontinuity','transport_failed','writer_failed')
-_REF_PATH = re.compile(r'(?:handshake|mapping|source-mappings|capture-inventory|child-summary|run-inventory|execution|(?:ticks|adapters|deliveries|delivery-summaries|channels|mapping-updates|publications|transport)-index)\.json|(?:ticks|adapters|deliveries|delivery-summaries|channels|mapping-updates|publications|transport)/(?:page|index|row)-[0-9]{6}\.json|tasks/task-[0-9]{4}-(?:context|envelope|record|evidence|result|receipt)\.json|fill/case-[0-9]{6}\.json|records/record-[0-9]{6}\.json|requests/request-[0-9]{6}\.json')
-_ORIGINAL_REF_PATH = re.compile(r'source/(?:journal\.jsonl|(?:terminal|mapping|source-mappings|source-manifest|tasks|profiles|execution)\.json)|native/(?:terminal\.json|native-[0-9]{6}\.jsonl|(?:index|counters)-[0-9]{6}\.json|(?:receipt|claims)-[0-9a-f]{64}\.json)')
+_REF_PATH = re.compile(r'(?:handshake|mapping|source-mappings|capture-inventory|child-summary|run-inventory|native-inventory|execution|(?:ticks|adapters|deliveries|delivery-summaries|channels|mapping-updates|publications|transport)-index)\.json|(?:ticks|adapters|deliveries|delivery-summaries|channels|mapping-updates|publications|transport)/(?:page|index|row)-[0-9]{6}\.json|tasks/task-[0-9]{4}-(?:context|envelope|record|evidence|result|receipt)\.json|fill/case-[0-9]{6}\.json|records/record-[0-9]{6}\.json|requests/request-[0-9]{6}\.json')
+_ORIGINAL_REF_PATH = re.compile(r'source/(?:journal\.jsonl|(?:terminal|mapping|mapping-records|controller-settlements|source-mappings|source-manifest|tasks|profiles|execution)\.json)|native/(?:terminal\.json|native-[0-9]{6}\.jsonl|(?:index|counters)-[0-9]{6}\.json|(?:receipt|claims)-[0-9a-f]{64}\.json)')
 
 
 def _line(value, limit):
@@ -210,6 +210,7 @@ class RecordingRuntimeArtifacts:
         self._counts={k:0 for k in KINDS}; self._logical_ticks=0; self._publications=0; self._record_ids=set()
         self._unique={k:set() for k in ('adapters','channels','transport','mapping-updates','delivery-summaries')}
         self._snapshot_bytes=0; self._sealed=None; self._seal_task=None;self._final_writes=set();self._final_closed=False
+        self._imported_indices={};self._parent_imported=False
         try:
             await self._thread(self._create)
             self._writer=asyncio.create_task(self._write())
@@ -284,6 +285,7 @@ class RecordingRuntimeArtifacts:
             self._loop.call_soon_threadsafe(self._wake.set)
 
     def _record(self, kind, row):
+        if self._parent_imported and kind!='channels':raise RuntimeError('parent may only append its channel outcomes after child import')
         data=_line(row,ROW_BYTES); row=decode(data); validate_outcome(kind,row)
         with self._lock:
             if self._counts[kind]>=LIMITS[kind]: raise RuntimeError('runtime outcome count exhausted')
@@ -372,6 +374,7 @@ class RecordingRuntimeArtifacts:
 
     async def write_task(self,task_ordinal,kind,value):
         integer(task_ordinal,0,63); _enum(kind,('context','envelope','record','evidence','result','receipt'))
+        if self._parent_imported and kind!='receipt':raise RuntimeError('parent cannot manufacture child task artifacts')
         maximum=32768 if kind=='context' else 128*1024 if kind in ('record','envelope') else PAGE_BYTES
         if kind in ('evidence','result','receipt'):validate_task_artifact(kind,value,self.execution_sha256)
         if kind in ('context','envelope','record'):
@@ -385,6 +388,15 @@ class RecordingRuntimeArtifacts:
         integer(ordinal,0,16383)
         return await self._write_named('requests/request-%06d.json'%ordinal,value,256*1024)
 
+    async def write_native_inventory(self,inventory):
+        from .recording_native_channel import NativeRunInventory
+        from .recording_native_schema import snapshot
+        if type(inventory) is not NativeRunInventory:raise TypeError('trusted parent-issued native inventory required')
+        context=inventory['context']
+        if any(context[k]!=self.execution[k] for k in ('collection_sha256','scope_protocol_sha256','instrumentation_protocol_sha256','invocation_ordinal')):
+            raise ValueError('parent native inventory original execution mismatch')
+        return await self._write_named('native-inventory.json',decode(encoded(inventory),PAGE_BYTES),PAGE_BYTES)
+
     async def write_fill_case(self,ordinal,value):
         integer(ordinal,0,16383);validate_fill_case(value,self.execution_sha256)
         return await self._write_named('fill/case-%06d.json'%ordinal,value,16*1024)
@@ -392,6 +404,9 @@ class RecordingRuntimeArtifacts:
     async def write_metadata(self,kind,value):
         _enum(kind,('handshake','mapping','source-mappings','capture-inventory','child-summary','run-inventory','execution'))
         validate_metadata(kind,value,self.execution_sha256)
+        if kind=='capture-inventory':
+            if self._sealed is None or value['delivery_outcomes']!=self._sealed['deliveries']:
+                raise ValueError('capture inventory follows and binds sealed delivery outcomes')
         if kind=='child-summary':
             if self._sealed is None:raise ValueError('child summary follows sealed runtime inventories')
             expected={'tick_inventory':'ticks','adapter_outcomes':'adapters','delivery_outcomes':'deliveries',
@@ -400,9 +415,9 @@ class RecordingRuntimeArtifacts:
             actual=[ref for path,ref in sorted(self._files.items()) if path.startswith('tasks/task-') and path.endswith('-result.json')]
             if value['task_results']!=actual:raise ValueError('child summary cannot omit/reorder written original task results')
         if self._sealed is not None:
-            if kind not in ('child-summary','run-inventory') or self._directory is None or self._aborted or self._final_closed:
+            if kind not in ('capture-inventory','child-summary','run-inventory') or self._directory is None or self._aborted or self._final_closed:
                 raise RuntimeError('only final summaries may follow sealed outcome inventory')
-            if self._failure and value['state']=='closed':raise ValueError('failed prefix cannot publish successful summary')
+            if self._failure and value.get('state')=='closed':raise ValueError('failed prefix cannot publish successful summary')
             data=_line(value,PAGE_BYTES);path=kind+'.json'
             with self._lock:
                 if path in self._paths:raise ValueError('immutable final summary already admitted')
@@ -484,6 +499,8 @@ class RecordingRuntimeArtifacts:
         await _finish(self._writer)
         inventories={}
         for kind in KINDS:
+            if kind in self._imported_indices:
+                inventories[kind]=self._imported_indices[kind];continue
             refs=self._data_refs[kind];tail=None;index_count=0
             for start in range(0,len(refs),128):
                 if self._pages>=MAX_PAGES:raise RuntimeError('combined runtime index page cap exhausted')
@@ -500,6 +517,152 @@ class RecordingRuntimeArtifacts:
             inventories[kind]=await self._thread(self._store,kind+'-index.json',data)
         self._sealed=inventories
         return inventories
+
+    async def ingest_child(self,directory,*,reaped_inventory,expected_refs=(),allow_financial=False):
+        """Exclusive byte-preserving import after the actual owned child reap.
+
+        Native files already arrived through parent native2 and are never
+        overwritten. The parent alone writes receipts, handshake, channel rows
+        and its final inventory. Unknown files and aliases fail closed.
+        """
+        from .recording_native_channel import NativeRunInventory
+        if type(reaped_inventory) is not NativeRunInventory or not reaped_inventory['parent_reaped']:
+            raise TypeError('actual parent-issued reaped native inventory required')
+        context=reaped_inventory['context']
+        if any(context[k]!=self.execution[k] for k in ('collection_sha256','scope_protocol_sha256','instrumentation_protocol_sha256','invocation_ordinal')):
+            raise ValueError('reaped child belongs to another original execution')
+        if self._parent_imported or self._sealed is not None:raise RuntimeError('one original child import before parent seal required')
+        expected={}
+        for ref in expected_refs:
+            validate_ref(ref)
+            if ref['path'] in expected and expected[ref['path']]!=ref:raise ValueError('conflicting original accepted artifact reference')
+            expected[ref['path']]=dict(ref)
+        if type(allow_financial) is not bool:raise TypeError('explicit original financial policy required')
+        result=await self._thread(self._import_files,directory,expected,allow_financial)
+        for kind in KINDS:
+            if kind=='channels':continue
+            path=kind+'-index.json'
+            if path in result:
+                ref=result[path];index=read_ref(self.output,ref)
+                for _ in iter_outcome_rows(self.output,ref,execution_sha256=self.execution_sha256,kind=kind):pass
+                self._imported_indices[kind]=ref;self._counts[kind]=index['row_count']
+        self._parent_imported=True
+        return dict(result)
+
+    def _import_files(self,directory,expected,allow_financial):
+        from .recording_runtime_inputs import _absolute_directory,_open_file,_identity
+        root=_absolute_directory(str(Path(directory).absolute()));files=[];total_runtime=0;file_count=0;financial_count=0
+        try:
+            def scan(fd,prefix=''):
+                nonlocal total_runtime,file_count,financial_count
+                with os.scandir(fd) as entries:
+                    for entry in entries:
+                        path=prefix+entry.name;info=entry.stat(follow_symlinks=False)
+                        if stat.S_ISDIR(info.st_mode):
+                            financial_dir=allow_financial and (not prefix and entry.name=='financial' or prefix=='financial/' and entry.name in ('source','evidence','settlements'))
+                            if not financial_dir and (prefix or entry.name not in (*KINDS,'tasks','records','requests','fill','source','native')):
+                                raise ValueError('unlisted child artifact directory')
+                            child=os.open(entry.name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=fd)
+                            try:scan(child,path+'/')
+                            finally:os.close(child)
+                        elif stat.S_ISREG(info.st_mode):
+                            financial=allow_financial and re.fullmatch(r'financial/(?:source/source-[0-9a-f]{64}|evidence/evidence-[0-9]{6}|settlements/receipt-[0-9]{6})\.json',path)
+                            if not (financial or _REF_PATH.fullmatch(path) or _ORIGINAL_REF_PATH.fullmatch(path)):
+                                raise ValueError('unlisted child artifact file')
+                            if path in ('handshake.json','run-inventory.json','native-inventory.json') or path.endswith('-receipt.json'):
+                                raise ValueError('child cannot author parent receipts or closure')
+                            file_count+=1
+                            if file_count>32768:raise ValueError('bounded child artifact file inventory required')
+                            if path.startswith('native/'):continue
+                            if path=='source/mapping-records.json' and info.st_size>65536:raise ValueError('bounded original mapping records required')
+                            if path=='source/controller-settlements.json' and (not allow_financial or info.st_size>1024**2):raise ValueError('U2 bounded original controller settlements required')
+                            if financial:
+                                financial_count+=1
+                                if financial_count>768 or not 1<=info.st_size<=65536:raise ValueError('bounded original financial files required')
+                                financial_fd=_open_file(root,path)
+                                try:raw=os.read(financial_fd,65537)
+                                finally:os.close(financial_fd)
+                                if _line(decode(raw,65536),65536)!=raw:raise ValueError('original financial canonical bytes required')
+                                if path.startswith('financial/source/') and path[len('financial/source/source-'):-5]!=_hash(raw):raise ValueError('original financial source filename mismatch')
+                            if path=='channels-index.json':
+                                # Child's empty channel inventory is not parent
+                                # observation. It must be empty, never relabeled.
+                                childfd=_open_file(root,path)
+                                try:data=os.read(childfd,PAGE_BYTES+1)
+                                finally:os.close(childfd)
+                                value=decode(data,PAGE_BYTES)
+                                if (value!={'schema_version':1,'kind':'recording_outcome_index','execution_sha256':self.execution_sha256,'page_kind':KINDS['channels'],'page_count':0,'row_count':0,'index_page_count':0,'index_tail':None,'state':'complete'}):
+                                    raise ValueError('child cannot assert parent channel outcomes')
+                                continue
+                            if path.startswith('channels/'):raise ValueError('child channel observations cannot replace parent evidence')
+                            if not path.startswith(('source/','financial/')):
+                                total_runtime+=info.st_size
+                                if total_runtime>MAX_METADATA_BYTES:raise ValueError('child runtime bytes exceed16MiB')
+                            elif info.st_size>1024**3:raise ValueError('original source artifact exceeds bound')
+                            files.append((path,_identity(info)))
+                        else:raise ValueError('child artifacts must be regular nofollow files')
+            scan(root)
+            paths={path for path,_ in files}
+            if not set(expected)<=paths:raise ValueError('previously accepted original artifact missing after reap')
+            if any(path in self._paths for path in paths):raise ValueError('child import would replace parent artifact')
+            for kind in KINDS:
+                path=kind+'-index.json'
+                if kind!='channels' and path in paths:
+                    fd=_open_file(root,path)
+                    try:data=os.read(fd,PAGE_BYTES+1)
+                    finally:os.close(fd)
+                    ref=dict(path=path,file_sha256=_hash(data),bytes=len(data))
+                    for _ in iter_outcome_rows(directory,ref,execution_sha256=self.execution_sha256,kind=kind):pass
+            for ref in expected.values():
+                if not ref['path'].startswith(('source/','native/')):read_ref(directory,ref)
+            if any(path.startswith('source/') for path in paths) and 'source' not in self._subdirs:
+                os.mkdir('source',mode=0o700,dir_fd=self._directory)
+                self._subdirs['source']=os.open('source',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=self._directory)
+            result={}
+            for path,identity in sorted(files):
+                source=_open_file(root,path)
+                try:
+                    if _identity(os.fstat(source))!=identity:raise ValueError('child artifact changed before import')
+                    size=identity[3]
+                    if path.startswith('financial/'):
+                        with self.budget._lock:
+                            source_bytes,metadata_bytes=getattr(self.budget,'_runtime_financial_import_bytes',(0,0))
+                            if path.startswith('financial/source/'):source_bytes+=size
+                            else:metadata_bytes+=size
+                            if max(source_bytes,metadata_bytes)>64*1024**2:raise ValueError('collection original financial import bound exhausted')
+                            self.budget._runtime_financial_import_bytes=(source_bytes,metadata_bytes)
+                    if path.startswith(('source/','financial/')):self.budget.reserve(size)
+                    else:self._charge(size)
+                    self._global_refs(1);self._paths.add(path)
+                    parts=path.split('/')
+                    if parts[0]=='financial':
+                        if 'financial' not in self._subdirs:
+                            os.mkdir('financial',mode=0o700,dir_fd=self._directory)
+                            self._subdirs['financial']=os.open('financial',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=self._directory)
+                        key='/'.join(parts[:-1])
+                        if key not in self._subdirs:
+                            os.mkdir(parts[1],mode=0o700,dir_fd=self._subdirs['financial'])
+                            self._subdirs[key]=os.open(parts[1],os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=self._subdirs['financial'])
+                    parent=self._directory if len(parts)==1 else self._subdirs['/'.join(parts[:-1])]
+                    target=os.open(parts[-1],os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=parent)
+                    hashed=hashlib.sha256();copied=0
+                    try:
+                        os.fchmod(target,0o600)
+                        while copied<=size:
+                            block=os.read(source,min(65536,size+1-copied))
+                            if not block:break
+                            copied+=len(block)
+                            if copied>size:raise ValueError('child artifact grew during import')
+                            hashed.update(block);_write_all(target,block)
+                        os.fsync(target)
+                    finally:os.close(target)
+                    if copied!=size or _identity(os.fstat(source))!=identity:raise ValueError('child original changed during import')
+                    ref=dict(path=path,file_sha256=hashed.hexdigest(),bytes=size)
+                    if path in expected and ref!=expected[path]:raise ValueError('accepted original artifact changed before import')
+                    self._files[path]=ref;result[path]=ref
+                finally:os.close(source)
+            return result
+        finally:os.close(root)
 
     async def close(self,*,cleanup_finished):
         if cleanup_finished is not True:raise ValueError('owned runtime cleanup must precede artifact close')

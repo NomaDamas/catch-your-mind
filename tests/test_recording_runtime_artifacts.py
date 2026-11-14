@@ -72,6 +72,18 @@ class RuntimeArtifacts(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(stat.S_IMODE(p.stat().st_mode)==0o600 for p in self.path.rglob('*.json')))
         with self.assertRaises(FileExistsError):await RecordingRuntimeArtifacts.open(self.path,execution(),budget=self.budget,retain_evaluation_artifacts=True)
 
+    async def test_capture_inventory_can_follow_seal_but_must_bind_sealed_deliveries(self):
+        refs=await self.writer.seal_inventory()
+        source=dict(path='source/terminal.json',file_sha256=H,bytes=1)
+        value=dict(schema_version=1,kind='recording_capture_inventory',execution_sha256=digest(execution()),
+            source_manifest_sha256=H,mapping_sha256=H,source_mappings=dict(path='source-mappings.json',file_sha256=H,bytes=1),
+            source_terminal=source,source_events=[],source_counters=source,delivery_outcomes=refs['ticks'])
+        with self.assertRaises(ValueError):await self.writer.write_metadata('capture-inventory',value)
+        value['delivery_outcomes']=refs['deliveries']
+        ref=await self.writer.write_metadata('capture-inventory',value)
+        self.assertEqual(read_ref(self.path,ref),value)
+        await self.writer.close(cleanup_finished=True)
+
     async def test_actual_sdk_accepted_record_snapshot_mutation_alias_and_external_retention(self):
         human=HumanSense(consent=True);self.addAsyncCleanup(human.close)
         human.register_capability(CapabilitySpec('source.fill','source.fill','video','test.source','1',
@@ -197,3 +209,49 @@ class RuntimeArtifacts(unittest.IsolatedAsyncioTestCase):
         observer.backend_closed(0,callback);await observer.close()
         index=validate_recording_native_inventory(d,native.output,source_inventory=d['source_manifest'])
         self.assertEqual(index.terminal['entry_count'],1)
+
+class ParentImport(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        import sys
+        from recording_native_fixtures import declarations
+        from benchmarks.recording_native_channel import ParentNativeChannel
+        from benchmarks.recording_native_schema import run_context,encoded
+        self.tmp=tempfile.TemporaryDirectory(dir='.');self.addCleanup(self.tmp.cleanup)
+        self.root=Path(self.tmp.name).resolve();d=declarations(self.root);paths={}
+        for k,v in d.items():
+            p=self.root/(k+'.json');p.write_bytes(encoded(v)+b'\n');paths[k]=str(p)
+        context=run_context(d,'a'*64,0)
+        native=ParentNativeChannel(context,d,paths=paths,output=self.root/'native',deadline_ns=time.monotonic_ns()+5_000_000_000)
+        self.addAsyncCleanup(native.abort)
+        child=await asyncio.create_subprocess_exec(sys.executable,'-c','pass',**native.prepare(dict(os.environ)))
+        native.spawned(child);await child.wait();await native.record_reaped(child)
+        self.inventory=native.snapshot();self.execution=execution()
+        for k in ('collection_sha256','scope_protocol_sha256','instrumentation_protocol_sha256','invocation_ordinal'):self.execution[k]=context[k]
+        self.parent=await RecordingRuntimeArtifacts.open(self.root/'parent',self.execution,budget=ArtifactBudget(),retain_evaluation_artifacts=True)
+        self.addAsyncCleanup(self.parent.abort)
+        self.child=await RecordingRuntimeArtifacts.open(self.root/'child',self.execution,budget=ArtifactBudget(),retain_evaluation_artifacts=True)
+        self.addAsyncCleanup(self.child.abort)
+        self.child.record_tick(tick());self.refs=await self.child.close(cleanup_finished=True)
+
+    async def test_original_copy_has_identical_hashes_and_parent_alone_writes_inventory(self):
+        copied=await self.parent.ingest_child(self.root/'child',reaped_inventory=self.inventory,expected_refs=[self.refs['ticks']])
+        self.assertEqual(copied['ticks-index.json'],self.refs['ticks'])
+        self.assertEqual((self.root/'child/ticks/page-000000.json').read_bytes(),(self.root/'parent/ticks/page-000000.json').read_bytes())
+        ref=await self.parent.write_native_inventory(self.inventory)
+        self.assertTrue(read_ref(self.root/'parent',ref)['parent_reaped'])
+        self.assertNotIn('native-inventory.json',copied)
+        sealed=await self.parent.close(cleanup_finished=True)
+        self.assertEqual(list(iter_outcome_rows(self.root/'parent',sealed['ticks'],execution_sha256=digest(self.execution),kind='ticks')),[tick()])
+        with self.assertRaises(TypeError):await self.parent.write_native_inventory(dict(self.inventory))
+
+    async def test_changed_accepted_file_rejected_before_copy(self):
+        path=self.root/'child/ticks-index.json';path.write_bytes(path.read_bytes().replace(b'complete',b'incomplete'))
+        with self.assertRaises(ValueError):await self.parent.ingest_child(self.root/'child',reaped_inventory=self.inventory,expected_refs=[self.refs['ticks']])
+        self.assertFalse((self.root/'parent/ticks-index.json').exists())
+
+    async def test_child_parent_namespace_and_unapproved_financial_tree_reject(self):
+        (self.root/'child/native-inventory.json').write_bytes(b'{}\n')
+        with self.assertRaises(ValueError):await self.parent.ingest_child(self.root/'child',reaped_inventory=self.inventory)
+        # Separate child tree tests no accidental financial authority in U1.
+        other=self.root/'other';other.mkdir();(other/'financial').mkdir()
+        with self.assertRaises(ValueError):await self.parent.ingest_child(other,reaped_inventory=self.inventory)
