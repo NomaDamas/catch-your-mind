@@ -70,7 +70,7 @@ class RecordingArmRuntime:
         self.policy=next(r for r in self.arm['recording_policies'] if r['recording_id']==self.manifest['recording_id'])
         arm_binding=next(a for a in self.declarations['collection']['arms'] if a['arm']==self.execution['arm'])
         self.bindings=arm_binding['provider_bindings'];self.binding_index={b['binding_id']:i for i,b in enumerate(self.bindings)}
-        self.receipt_router=receipt_router;self.finance=None;self.lanes={};self.controllers={};self.clock=None;self.mapping_ref=None
+        self.receipt_router=receipt_router;self.finance=None;self.lanes={};self.controllers={};self.clock=None;self.mapping_ref=None;self.source_mappings_ref=None
         self.human=self.streams=self.source=self.router=self.perception=self.task_runtime=self.journal=self.fill_driver=None
         self._close_task=None;self.jobs=[];self.failures={};self.clock_state='unknown';self.cleanup_finished_ns=None
         self._lane_opened={};self._lane_closed={};self._delivery_lanes=[];self._source_terminal=None;self.capture_inventory=None
@@ -123,7 +123,8 @@ class RecordingArmRuntime:
             'source-manifest.json':self.manifest,'tasks.json':self.tasks,'profiles.json':self.declarations['profiles'],
             'execution.json':self.execution},predicted_events=2*len(self.manifest['records'])+2*len(self.manifest['sources'])+16)
         fd=self.inputs.duplicate_payload_root(self.manifest['recording_id'])
-        try:self.source=await OwnedCaptureSource.preflight(self.manifest,fd,CaptureCapacity(source_bytes,max_lateness_ns=50_000_000),journal=self.journal)
+        source_lateness=50_000_000 if self.u['schema_version']==1 else self.docs['runtime/exposure.json']['source_policy']['max_acquisition_lateness_ns']
+        try:self.source=await OwnedCaptureSource.preflight(self.manifest,fd,CaptureCapacity(source_bytes,max_lateness_ns=source_lateness),journal=self.journal)
         finally:os.close(fd)
         self.human=HumanSense(consent=True)
         from .recorded_replay import MAPPING
@@ -351,7 +352,7 @@ class RecordingArmRuntime:
         # Seal source evidence before the summary. Exact original268 JSON bytes
         # have no added LF and are referenced through their original reader.
         indices=await self.artifacts.seal_inventory()
-        if self.clock is not None and self._source_terminal is not None:
+        if self.mapping_ref is not None and self.source_mappings_ref is not None and self._source_terminal is not None:
             journal=self.journal.status()
             job=asyncio.create_task(asyncio.to_thread(_journal_ref,self.artifacts.output,journal['valid_prefix_bytes']))
             try:events=await asyncio.shield(job)

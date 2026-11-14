@@ -97,6 +97,78 @@ class OriginalRunJoin(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             self.validate(documents=changed)
 
+    async def test_mapping_startup_failures_retain_failed_prefix_and_next_arm(self):
+        # Test-only child wrapper: the production command and runtime have no
+        # injectable implementation or environment-controlled failure hook.
+        script = '''
+import asyncio, sys
+from benchmarks.recording_arm_runtime import RecordingArmRuntime
+from benchmarks.recording_runtime_artifacts import RecordingRuntimeArtifacts
+from benchmarks.recording_artifacts import RecordingArtifacts
+from benchmarks.recording_control_channel import ChildCoordinatorChannel
+from humansense import HumanSense
+phase=sys.argv.pop(1)
+def fail(): raise OSError('synthetic startup boundary '+phase)
+original_metadata=RecordingRuntimeArtifacts.write_metadata
+async def metadata(self, kind, value):
+    if phase=='metadata-'+kind:
+        if kind=='mapping': await asyncio.sleep(.1)
+        fail()
+    return await original_metadata(self, kind, value)
+RecordingRuntimeArtifacts.write_metadata=metadata
+original_json=RecordingArtifacts.write_json
+async def write_json(self, name, value, **kw):
+    if phase=='journal-'+name: fail()
+    return await original_json(self, name, value, **kw)
+RecordingArtifacts.write_json=write_json
+original_emit=RecordingArtifacts.emit
+def emit(self, name, value):
+    if phase=='mapping-event' and name=='mapping_published': fail()
+    return original_emit(self, name, value)
+RecordingArtifacts.emit=emit
+original_push=HumanSense.push_observation
+async def push(self, capability_id, *args, **kw):
+    if phase=='publication' and capability_id=='replay.mapping.v1': fail()
+    return await original_push(self, capability_id, *args, **kw)
+HumanSense.push_observation=push
+original_send=ChildCoordinatorChannel.send_wait
+async def send(self, kind, fields):
+    if phase=='playback' and kind=='playback_started': fail()
+    return await original_send(self, kind, fields)
+ChildCoordinatorChannel.send_wait=send
+from benchmarks.recording_arm import main
+raise SystemExit(main())
+'''
+        real_spawn=asyncio.create_subprocess_exec
+        phases=('metadata-mapping','metadata-source-mappings','journal-mapping.json',
+            'journal-source-mappings.json','journal-mapping-records.json','publication','playback','mapping-event')
+        from benchmarks.recording_runtime_artifacts import read_ref
+        for ordinal,phase in enumerate((*phases,None)):
+            async def spawn(*args, **kw):
+                return await real_spawn(*(args if phase is None else (args[0],'-c',script,phase,*args[3:])), **kw)
+            with self.subTest(phase=phase),patch('asyncio.create_subprocess_exec',spawn):
+                result=await _run_one(str(self.fixture.root),self.root/f'stage/{ordinal:02}',self.root/f'runs/{ordinal:02}',
+                    self.docs,self.bundles,self.declarations,self.budget,
+                    self.docs['runtime/collection.json']['invocations'][ordinal],retain_financial_documents=False)
+                _,run,token,activation=result
+                directory=self.root/f'runs/{ordinal:02}'
+                joined=validate_recording_run(directory,documents=self.docs,source_bundles=self.bundles,
+                    invocation_ordinal=ordinal,parent_native_inventory=token,activation_started_ns=activation)
+                self.assertIsNotNone(run['process_reaped_ns'])
+                self.assertIsNotNone(run['child_summary'])
+                if phase is None:
+                    self.assertEqual(run['state'],'closed')
+                    self.assertTrue(joined.financial_values['source_comparable'])
+                else:
+                    self.assertEqual(run['state'],'failed')
+                    self.assertEqual(read_ref(directory,run['child_summary'])['state'],'failed')
+                    self.assertIsNone(joined.financial_values['playback_anchor_ns'])
+                    for key in ('source_comparable','operational_closed','clock_consistent'):
+                        self.assertFalse(joined.financial_values[key])
+                    for receipt,task in zip(joined.task_receipts,self.declarations[ordinal//3]['tasks']):
+                        self.assertEqual(receipt['status'],'not_executed')
+                        self.assertEqual(receipt['latency_ns'],task['deadline_ns']-task['opens_ns'])
+
     async def test_actual_child_source_sdk_native_response_and_parent_receipt_join(self):
         _, run, token, _ = await self.run_one()
         self.assertEqual(run['state'], 'closed', (run,self.child_output))
@@ -107,6 +179,23 @@ class OriginalRunJoin(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(joined.financial_values['native_terminal_sha256'], token['terminal_sha256'])
         self.assertEqual(joined.task_receipts[0]['status'], 'answer')
         self.assertEqual(joined.controller_settlements, [])
+        # Selected ticks finish after later busy/late rows. Joining originals
+        # must be independent of completion order without accepting omissions.
+        from benchmarks import recording_runtime_validation as validation
+        original_outcomes=validation._outcomes
+        def outcomes(directory,ref,execution,kind,violations):
+            rows=list(original_outcomes(directory,ref,execution,kind,violations))
+            if kind=='ticks':
+                self.assertGreater(len(rows),1)
+                rows.reverse()
+                if mutation=='duplicate':rows.append(rows[0])
+                elif mutation=='missing':rows.pop()
+            return iter(rows)
+        for mutation in ('reordered','duplicate','missing'):
+            with self.subTest(tick_inventory=mutation),patch.object(validation,'_outcomes',outcomes):
+                if mutation=='reordered':self.assertTrue(self.validate().financial_values['source_comparable'])
+                else:
+                    with self.assertRaises(ValueError):self.validate()
         # Answer text cannot stand in for a different actual SDK/native result.
         import json
         path = self.root / 'runs/00/requests/request-000000.json'

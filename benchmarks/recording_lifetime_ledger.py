@@ -258,7 +258,10 @@ def _financial_inventory(store,value,*,adapters,policy,exposure,collection_sha25
     for row in iter_financial_rows(store,'source',value['source_documents']):
         keys(row,('source_document',),'original source document row'); ref = reference(row['source_document'])
         if ref['file_sha256'] in documents: raise ValueError('duplicate original source document')
-        document = validate_invoice(store.read(ref)); documents[ref['file_sha256']] = (ref,document)
+        document = validate_invoice(store.read(ref))
+        if any(document[k]!=policy[k] for k in ('currency','currency_unit')):
+            raise ValueError('original invoice denomination differs from frozen accounting policy')
+        documents[ref['file_sha256']] = (ref,document)
         store.reserve_index((ref,document))
         source_bytes += ref['bytes']
         if source_bytes > 64*1024**2: raise ValueError('original financial source byte cap exceeded')
@@ -361,7 +364,7 @@ def _financial_inventory(store,value,*,adapters,policy,exposure,collection_sha25
         finality[h] = (ref,obj); used_finality.add(obj['stream_id'])
         store.reserve_index((ref,obj))
     return dict(documents=documents,original_lines=original_lines,evidence=evidence,operations=financial_operations,
-                lanes=lanes,finality=finality,unverified_instances=unverified_instances)
+                lanes=lanes,finality=finality,unverified_instances=unverified_instances,settlements=actual_settlements,state=value['state'])
 
 
 def _validate_costs(store,page_refs,*,policy,runs,lifetimes,financial,operations,work,collection=None):
@@ -652,6 +655,8 @@ def validate_lifetime_ledger(policy,exposure,runtime,collection,scope_protocol,i
         collection_sha256=digest(collection),operations=operations,keys_to_instance=operation_keys,runs=runs)
     totals,reasons,lines = _validate_costs(store,ledger['entry_pages'],policy=policy,runs=runs,lifetimes=lifetimes,
         financial=financial,operations=operations,work=work,collection=collection)
+    if financial['state']!='complete':
+        for sid in reasons:reasons[sid].add('financial_inventory_incomplete')
     closures = store.read(reference(ledger['closure']))
     keys(closures,('schema_version','kind','closures'),'financial closure inventory')
     _schema(closures,1,'recording_financial_closures')
@@ -673,6 +678,10 @@ def validate_lifetime_ledger(policy,exposure,runtime,collection,scope_protocol,i
         if obj['operational_end_ns'] is not None and sealed < obj['operational_end_ns']: raise ValueError('seal precedes actual operational closure')
         expected_operations = [o for o in financial['operations'].values() if o['invocation_ordinal'] == run.invocation_ordinal]
         required_lanes = [lane for key,lane in financial['lanes'].items() if key[0] == sid]
+        receipt_times=[row['observed_received_ns'] for row in financial['evidence'].values() if row['stream_id']==sid]
+        receipt_times.extend(row['observed_ns'] for row in financial['settlements'].get(run.invocation_ordinal,[]))
+        if any(stamp>sealed for stamp in receipt_times):
+            raise ValueError('sealed financial inventory contains a future receipt or settlement')
         settled_count = sum(o['status'] == 'settled' and o['basis'] != 'unknown' for o in expected_operations)
         expected_counts = dict(operation_count=len(expected_operations),known_settled_operations=settled_count,
             unresolved_operations=len(expected_operations)-settled_count,required_lane_count=len(required_lanes),
@@ -700,6 +709,10 @@ def validate_lifetime_ledger(policy,exposure,runtime,collection,scope_protocol,i
                 raise ValueError('finality does not cover complete operation/lane inventories')
             if run.parent_resources_closed_ns is None or not run.parent_resources_closed_ns <= finality_obj['service_end_ns'] <= finality_obj['issued_ns'] <= sealed:
                 raise ValueError('finality issued before all attributable work closed')
+            if any(lane['window_end_ns']>finality_obj['service_end_ns'] for lane in required_lanes):
+                raise ValueError('finality excludes an original resource service window')
+            if any(stamp>finality_obj['issued_ns'] for stamp in receipt_times):
+                raise ValueError('finality precedes its original receipt or settlement')
             valid_finality.append(h)
         if len(valid_finality) != 1: reasons[sid].add('missing_authoritative_fixture_finality')
         # Original F1 receipts precede finality and retain their nullable pointer

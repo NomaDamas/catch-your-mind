@@ -32,7 +32,7 @@ from test_recording_lifetime_ledger import runview,lifetime
 import test_text_context_call as text_tests
 
 
-async def complete_collection(root,store):
+async def complete_collection(root,store,*,financial_state='complete'):
     ds,l,bundles,numeric,responses,scenarios=prospective();d=ds[0]
     admission=preflight_runtime_collection(ds,latency_policy=l,source_bundles=bundles,numeric_inputs=numeric)
     if not admission['sample_gate_eligible'] or admission['predicted_artifact_bytes']>4*1024**3:
@@ -115,7 +115,7 @@ async def complete_collection(root,store):
     fin=dict(schema_version=1,kind='recording_financial_inventory',exposure_policy_sha256=digest(e),accounting_policy_sha256=digest(k),
         financial_adapter_inventory_sha256=digest(f),collection_sha256=upstream_digest(c),source_documents=store.write_index('source',source_rows),
         evidence_pages=store.write_index('evidence',evidence_rows),operation_pages=store.write_index('operations',operation_rows),
-        lane_closure_pages=store.write_index('lanes',lane_rows),finality=store.write_index('finality',finality_rows),state='complete')
+        lane_closure_pages=store.write_index('lanes',lane_rows),finality=store.write_index('finality',finality_rows),state=financial_state)
     finref=store.write('ledger/financial-inventory.json',fin);closures=[];seal=0
     for ordinal,run in enumerate(runs):
         seal=time.monotonic_ns()
@@ -145,6 +145,15 @@ async def complete_collection(root,store):
 
 
 class ActualNumericFinance(unittest.IsolatedAsyncioTestCase):
+    async def test_explicitly_incomplete_original_inventory_cannot_claim_closed_finance(self):
+        asyncio.get_running_loop().slow_callback_duration=2
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            root=Path(directory).resolve()
+            with FinancialArtifacts(root) as store:
+                args,_,_=await complete_collection(root,store,financial_state='incomplete')
+                with self.assertRaisesRegex(ValueError,'falsely claims closed'):
+                    validate_lifetime_ledger(**args)
+
     async def test_prospective_twenty_four_groups_actual_sdk_settlement_and_full_financial_reconciliation(self):
         asyncio.get_running_loop().slow_callback_duration=2
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
@@ -168,6 +177,17 @@ class ActualNumericFinance(unittest.IsolatedAsyncioTestCase):
                 original=dict(runtime_policy_sha256=upstream_digest(args['runtime']),collection_sha256=upstream_digest(args['collection']),
                     scope_protocol_sha256=upstream_digest(args['scope_protocol']),instrumentation_protocol_sha256=upstream_digest(args['instrumentation']),
                     execution_inventory_sha256='c'*64)
+                forged_plan=copy.deepcopy(args['plan'])
+                forged_plan['comparison'].update(evidence='measured',held_out=True)
+                forged_assessment=copy.deepcopy(assessment)
+                forged_assessment['comparison_plan_sha256']=plan_digest(forged_plan)
+                alternate=compare_quality_latency(forged_plan,forged_assessment,receipts,
+                    expected_assessment_sha256=plan_digest(forged_assessment))
+                with self.assertRaisesRegex(ValueError,'original policy/assessment'):
+                    reconcile_exposure(forged_plan,args['exposure'],args['recordings'],validated,alternate,**original)
+                forged_recordings=copy.deepcopy(args['recordings']);forged_recordings['groups'].reverse()
+                with self.assertRaisesRegex(ValueError,'original policy/assessment'):
+                    reconcile_exposure(args['plan'],args['exposure'],forged_recordings,validated,quality,**original)
                 for field in original:
                     changed=dict(original);changed[field]='9'*64
                     forged=copy.deepcopy(assessment)

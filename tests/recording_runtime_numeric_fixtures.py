@@ -52,8 +52,10 @@ def numeric_runtime_fixture(original, root):
     k['financial_adapter_inventory_sha256']=digest(f)
     e.update(comparison_plan_sha256=digest(p),recordings_sha256=digest(g),latency_policy_sha256=digest(l),
              accounting_policy_sha256=digest(k),financial_adapter_inventory_sha256=digest(f))
-    # max lateness is frozen up front; no capture timestamp is retimed to fit.
-    e['source_policy']['max_acquisition_lateness_ns']=100_000_000
+    # This process/finance fixture tolerates loaded CI scheduling. It is not a
+    # realtime performance target. Freeze before activation; preserve all actual
+    # timestamps and drops. Dedicated acquisition tests cover strict lateness.
+    e['source_policy']['max_acquisition_lateness_ns']=500_000_000
     responses=docs['responses/000.json'];scenarios=[]
     for row in responses['rows']:
         inv=c['invocations'][row['invocation_ordinal']];arm=next(a for a in u['arms'] if a['arm']==inv['arm'])

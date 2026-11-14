@@ -30,6 +30,17 @@ unsupported ownership, and unsafe filesystem aliases are rejected. The join
 uses at most128MiB of conservatively charged retained working indexes; source
 records use compact arrays and source journal events are streamed.
 
+A child-local mapping is not a parent-confirmed playback timestamp. Failure
+between mapping persistence and PLAYBACK notification retains the local prefix,
+but parent task receipts stay `not_executed` with their original latency floor
+and the financial playback timestamp remains unknown. A conflicting observed
+parent anchor is still rejected. Failed source journals may omit mapping writes
+or a suffix of mapping-publication events; every retained record is validated.
+Perception outcomes may arrive in backend completion order. Bounded opportunity
+coverage checks still reject duplicated, overlapping or missing ticks and
+reversed/reused selected captures without requiring completion order to equal
+schedule order.
+
 Before activation, `preflight_recording_run_validation(declarations, execution,
 publication_rows=...)` returns conservative `peak_workspace_bytes` and
 `retained_workspace_bytes` bounds. The coordinator adds its owned input workspace

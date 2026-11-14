@@ -152,7 +152,8 @@ def reconcile_exposure(plan,exposure,recordings,ledger,quality_latency,*,runtime
     if type(ledger) is not ValidatedLifetimeLedger or type(quality_latency) is not ValidatedQualityLatency:
         raise TypeError('typed validated full lifetime and original task reports required')
     if (quality_latency.comparison_plan_sha256 != plan_digest(plan) or ledger.exposure_sha256 != digest(exposure) or
-            ledger.policy_sha256 != exposure['accounting_policy_sha256']):
+            ledger.policy_sha256 != exposure['accounting_policy_sha256'] or
+            exposure['comparison_plan_sha256'] != plan_digest(plan) or exposure['recordings_sha256'] != digest(recordings)):
         raise ValueError('reconciliation original policy/assessment bindings differ')
     if allocation_sha256 is not None: raise ValueError('allocation adapter not yet reviewed for lifetime2; cannot accept an old allocation')
     for value in (runtime_policy_sha256,collection_sha256,scope_protocol_sha256,

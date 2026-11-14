@@ -42,6 +42,13 @@ Required proxies, unfinished resources and unrecognized real charges cannot
 become zero. Known late financial evidence requires immutable invalidation and
 a new reviewed validity checkpoint; sealed ledger bytes are not rewritten.
 
+Original invoice currency and atomic currency unit must exactly match the frozen
+accounting policy; there is no implicit exchange or denomination conversion.
+Receipts and actual SDK settlements cannot postdate the inventory seal or its
+finality evidence, and finality must cover every required resource service
+window. An explicitly incomplete financial inventory remains incomplete even
+when its retained known rows reconcile.
+
 Focused verification includes actual TextContextCalls/FixtureCompletion/native4
 entries and real SDK budget transitions, cancellation and malformed responses,
 a prospective Q2/I3 24-recording/72-arm financial fixture, all failed original

@@ -237,6 +237,9 @@ def _execution_inventory(value,documents,runs):
         execution=validated.execution;run=validated.run_inventory
         if validated.financial_values['invocation_ordinal']!=invocation['ordinal'] or execution!=documents[f"invocations/{invocation['ordinal']:02}/execution.json"]:
             raise ValueError('typed runtime joins cross original execution set/order')
+        prefix=f"runs/{invocation['ordinal']:02}/"
+        if execution_ref.get('path')!=prefix+'execution.json' or run_ref.get('path')!=prefix+'run-inventory.json':
+            raise ValueError('fixed original execution/run paths required')
         for ref,original in ((execution_ref,execution),(run_ref,run)):
             reference(ref);raw=encode(original,newline=True)
             if ref['path'] in seen_paths or (ref['file_sha256'],ref['bytes'])!=(hashlib.sha256(raw).hexdigest(),len(raw)):

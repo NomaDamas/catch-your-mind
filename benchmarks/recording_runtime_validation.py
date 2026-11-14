@@ -331,27 +331,33 @@ def _source_files(directory,terminal,d,execution,mapping,mappings,events):
     expected={'source-manifest.json':d['source_manifest'],'tasks.json':d['tasks'],
         'profiles.json':d['profiles'],'execution.json':execution,'mapping.json':mapping,'source-mappings.json':mappings}
     for path,value in expected.items():
+        # A failed child may stop between the two mapping writes. Validate
+        # every retained original, but never infer that absent writes happened.
+        if path not in files and terminal['state']=='failed' and path in ('mapping.json','source-mappings.json'):continue
         if path not in files or _json(directory,files[path],maximum=64*1024**2,original=True)!=value:
             raise ValueError('source original declaration/mapping changed')
     ref=files.get('mapping-records.json')
     if ref is None:
-        if terminal['state']=='failed':return files,[]
+        if terminal['state']=='failed' and not events:return files,[]
         raise ValueError('registered original mapping record inventory required')
     records=_json(directory,ref,maximum=65536,original=True)
-    if type(records) is not list or len(records)!=len(mappings) or len(events)!=len(records):
+    if (type(records) is not list or len(records)!=len(mappings) or len(events)>len(records) or
+            terminal['state']!='failed' and len(events)!=len(records)):
         raise ValueError('complete registered source mapping inventory required')
     ids=set()
-    for ordinal,(record,mapped,event) in enumerate(zip(records,mappings,events)):
-        fields=event['fields'];keys(fields,('source_id','mapping_sha256','source_mapping_sha256','record_sha256','record_ordinal','mapping_records_sha256'))
+    for ordinal,(record,mapped) in enumerate(zip(records,mappings)):
         source=mapped['original_source'];observation=record.get('observation',{});sensor=observation.get('sensor',{})
         if (record.get('type')!='observation.signal' or record.get('id') in ids or
                 observation.get('capability',{}).get('id')!='replay.mapping.v1' or observation.get('value')!={'mapping':mapped} or
                 sensor.get('source_id')!=source['source_id'] or sensor.get('sensor_id')!=source['sensor_id'] or
-                sensor.get('stream_epoch')!=source['stream_epoch'] or record.get('timestamp_ms')!=mapping['sdk_anchor_ms'] or
-                fields!=dict(source_id=source['source_id'],mapping_sha256=digest(mapping),source_mapping_sha256=digest(mapped),
-                    record_sha256=digest(record),record_ordinal=ordinal,mapping_records_sha256=ref['file_sha256'])):
+                sensor.get('stream_epoch')!=source['stream_epoch'] or record.get('timestamp_ms')!=mapping['sdk_anchor_ms']):
             raise ValueError('registered original SDK mapping record/event differs')
         ids.add(record['id'])
+        if ordinal<len(events):
+            fields=events[ordinal]['fields'];keys(fields,('source_id','mapping_sha256','source_mapping_sha256','record_sha256','record_ordinal','mapping_records_sha256'))
+            if fields!=dict(source_id=source['source_id'],mapping_sha256=digest(mapping),source_mapping_sha256=digest(mapped),
+                    record_sha256=digest(record),record_ordinal=ordinal,mapping_records_sha256=ref['file_sha256']):
+                raise ValueError('registered original SDK mapping record/event differs')
     return files,records
 
 
@@ -438,29 +444,45 @@ def _runtime_outcomes(directory,summary,d,execution,mapping,flags,times,operatio
         schedule=RecordedTickSchedule(duration_ns=manifest['duration_ns'],period_ns=definition['period_ns'] if kind=='periodic' else definition['selection_period_ns'],
             phase_ns=definition['phase_ns'],time_origin_policy=definition.get('time_origin_policy','recording_start'),origin_capture_ns=manifest['origin_capture_ns'],
             max_age_ms=definition.get('max_age_ms',1000),deadline_tolerance_ns=definition.get('deadline_tolerance_ns',definition.get('max_lateness_ns')))
-        schedules[kind]=dict(definition=definition,source_index=si,schedule=schedule,next=0,last=-1)
+        # Backend completion order is not schedule order. Retain only bounded
+        # opportunity coverage and selected ordinals, not all result objects.
+        schedules[kind]=dict(definition=definition,source_index=si,schedule=schedule,count=0,
+            seen=bytearray(schedule.opportunity_count),selected=array('q',[-1])*schedule.opportunity_count)
     for row in _outcomes(directory,summary['tick_inventory'],digest(execution),'ticks',violations):
         selected=schedules.get(row['policy'])
         if selected is None or mapping is None:raise ValueError('tick activates an unfrozen original perception policy')
-        schedule=selected['schedule'];n=selected['next'];due=schedule.first_due_ns+n*schedule.period_ns
-        if (row['tick_index']!=n or row['first_due_offset_ns']!=due or row['period_ns']!=schedule.period_ns or row['source_index']!=selected['source_index'] or
+        schedule=selected['schedule'];n=row['tick_index'];due=schedule.first_due_ns+n*schedule.period_ns
+        if (row['first_due_offset_ns']!=due or row['period_ns']!=schedule.period_ns or row['source_index']!=selected['source_index'] or
                 n+row['count']>schedule.opportunity_count or row['observed_begin_ns']<mapping['monotonic_anchor_ns']+due):
-            raise ValueError('tick changed or omitted original frozen opportunities')
-        selected['next']+=row['count']
+            raise ValueError('tick changed or omitted original frozen opportunities: '
+                f"policy={row['policy']}, index={row['tick_index']}/{n}, due={row['first_due_offset_ns']}/{due}, "
+                f"period={row['period_ns']}/{schedule.period_ns}, source={row['source_index']}/{selected['source_index']}, "
+                f"count={row['count']}, opportunities={schedule.opportunity_count}, "
+                f"observed_offset={row['observed_begin_ns']-mapping['monotonic_anchor_ns']}")
+        for tick in range(n,n+row['count']):
+            if selected['seen'][tick]:raise ValueError('duplicate or overlapping original tick opportunity')
+            selected['seen'][tick]=1
+        selected['count']+=row['count']
         if row['capture_ref'] is not None:
             ri=_capture(row['capture_ref'],manifest,mapping,flags,times,before=row['observed_begin_ns']);original=manifest['records'][ri]
             actual_due=mapping['monotonic_anchor_ns']+due
-            if original['offset_ns']>due or times[ri]>actual_due or ri<=selected['last']:raise ValueError('tick selected future or reused original capture')
+            if original['offset_ns']>due or times[ri]>actual_due:raise ValueError('tick selected future original capture')
             if row['outcome']!='stale':
                 if row['observed_begin_ns']-actual_due>schedule.tolerance_ns or row['observed_begin_ns']-(mapping['monotonic_anchor_ns']+original['offset_ns'])>schedule.max_age_ns:
                     raise ValueError('tick silently changed frozen lateness/freshness')
-                selected['last']=ri
+                selected['selected'][n]=ri
         if row['operation_instance'] is not None:
             op=operations.get(row['operation_instance'])
             if op is None or op['scope_index']!=0 or row['capture_ref'] not in _operation_captures(op,publications):raise ValueError('tick has no actual stream-owned native capture entry')
         if row['case'] is not None:
             _fill_join(directory,row,d,execution,operations,publications,selected['definition'])
-    if summary['state']=='closed' and any(v['next']!=v['schedule'].opportunity_count for v in schedules.values()):
+    for selected in schedules.values():
+        last=-1
+        for ri in selected['selected']:
+            if ri<0:continue
+            if ri<=last:raise ValueError('tick reused or reversed original selected capture')
+            last=ri
+    if summary['state']=='closed' and any(v['count']!=v['schedule'].opportunity_count for v in schedules.values()):
         raise ValueError('closed child omits original perception opportunities')
 
 
@@ -584,7 +606,7 @@ def _native(directory,d,documents,bundles,numeric,parent,run,violations,budget):
     return index,operations,sorted(work,key=lambda r:(r['work_ordinal'],r['worker_ordinal'])),counts
 
 
-def _task_join(directory,summary,tasks,receipts,execution,manifest,mapping,operations,publications,clock_known,mapping_records,require_native=True,source_known=True):
+def _task_join(directory,summary,tasks,receipts,execution,manifest,mapping,operations,publications,clock_known,mapping_records,require_native=True,source_known=True,*,parent_anchor):
     results={};rows=[];receipt_values=[];used_operations=set()
     if summary is not None:
         for ref in summary['task_results']:
@@ -692,7 +714,9 @@ def _task_join(directory,summary,tasks,receipts,execution,manifest,mapping,opera
                 raise ValueError('answer receipt excludes original deadline/validation delay/result')
         else:
             observed=receipt['received_ns'] if receipt['received_ns'] is not None else receipt['failed_observed_ns']
-            expected=floor if anchor is None or observed is None else max(floor,observed-anchor-task['opens_ns'])
+            if parent_anchor is None and (receipt['status']!='not_executed' or receipt['received_ns'] is not None or receipt['result_sha256'] is not None):
+                raise ValueError('unconfirmed playback cannot supply a parent task receipt')
+            expected=floor if parent_anchor is None or observed is None else max(floor,observed-parent_anchor-task['opens_ns'])
             if receipt['latency_ns']!=expected:raise ValueError('failed original task latency floor/later observation changed')
         receipt_values.append(receipt)
         rows.append(dict(task_id=tid,input_sha256=task['input_sha256'],scope_index=n+1,result=result_ref,evidence=evidence_ref,parent_receipt=ref))
@@ -739,7 +763,10 @@ def validate_recording_run(directory,*,documents,source_bundles,invocation_ordin
             m=d['source_manifest']
             if any(mapping[k]!=m[k] for k in ('recording_id','origin_capture_ns','duration_ns')) or mapping['source_manifest_sha256']!=digest(m):
                 raise ValueError('replay clock differs from original source')
-            if mapping['monotonic_anchor_ns']!=handshake['anchor_monotonic_ns']:raise ValueError('replay anchor differs from actual parent START handshake')
+            if handshake['anchor_monotonic_ns'] is not None and mapping['monotonic_anchor_ns']!=handshake['anchor_monotonic_ns']:
+                raise ValueError('replay anchor differs from actual parent START handshake')
+            if handshake['anchor_monotonic_ns'] is None and (run['state']!='failed' or summary['state']!='failed'):
+                raise ValueError('unconfirmed playback requires an explicitly failed run and child')
         if summary['capture_inventory'] is not None:
             capture=read_ref(directory,summary['capture_inventory'])
             if run['source_inventory']!=capture['source_terminal'] or mapping is None:raise ValueError('parent/source child inventory mismatch')
@@ -770,7 +797,8 @@ def validate_recording_run(directory,*,documents,source_bundles,invocation_ordin
             raise ValueError('actual operation crosses frozen stream/task ownership')
         for ref in op['evidence_refs']:
             if ref['kind']=='capture':
-                if mapping is None:raise ValueError('native capture requires original replay mapping')
+                if mapping is None and (summary is None or summary['state']!='failed'):
+                    raise ValueError('native capture requires original replay mapping')
                 if capture is not None:_capture(ref,d['source_manifest'],mapping,flags,times,before=op['entered_monotonic_ns'])
     publications={};ordinal=0
     if summary is not None:
@@ -779,7 +807,7 @@ def validate_recording_run(directory,*,documents,source_bundles,invocation_ordin
             budget.retain(row)
             if row['publication_ordinal']!=ordinal or row['record_id'] in publications:raise ValueError('publication original ordinal/record duplicated')
             ordinal+=1
-            if row['source_mapping_sha256']!=digest(mapping):raise ValueError('accepted record changed original source mapping')
+            if mapping is not None and row['source_mapping_sha256']!=digest(mapping):raise ValueError('accepted record changed original source mapping')
             if capture is not None:
                 for cap in row['capture_refs']:_capture(cap,d['source_manifest'],mapping,flags,times,before=row['published_monotonic_ns'])
             if mapping is not None and source_mappings:_publication_source(row,record,d,execution,mapping,source_mappings)
@@ -798,7 +826,7 @@ def validate_recording_run(directory,*,documents,source_bundles,invocation_ordin
         # the original indexes but do not certify their asserted counters.
         for kind,name in (('adapters','adapter_outcomes'),('deliveries','delivery_outcomes'),('ticks','tick_inventory'),('mapping-updates','mapping_updates')):
             for _ in _outcomes(directory,summary[name],execution_sha,kind,violations):pass
-    receipts,task_rows=_task_join(directory,summary,d['tasks'],run['receipts'],execution_sha,d['source_manifest'],mapping,operations,publications,clock_known,mapping_records,index is not None,capture is not None)
+    receipts,task_rows=_task_join(directory,summary,d['tasks'],run['receipts'],execution_sha,d['source_manifest'],mapping,operations,publications,clock_known,mapping_records,index is not None,capture is not None,parent_anchor=handshake['anchor_monotonic_ns'])
     controller_settlements=_settlements(directory,terminal,source_files,settlement_events,documents,execution,operations,index)
     channel_keys=set()
     for row in _outcomes(directory,run['channel_outcomes'],execution_sha,'channels',violations):
@@ -829,7 +857,7 @@ def validate_recording_run(directory,*,documents,source_bundles,invocation_ordin
     values=dict(execution_sha256=execution_sha,run_inventory_sha256=digest(run),invocation_ordinal=invocation,stream_id=inv['stream_id'],
         recording_id=original['recording_id'],arm=inv['arm'],source_manifest_sha256=digest(d['source_manifest']),source_coverage_sha256=digest(coverage),
         source_comparable=source_complete,task_row_inventory_sha256=digest(task_rows),clock_domain=handshake['clock_domain'],clock_consistent=clock_known,
-        activation_started_ns=activation,child_spawn_started_ns=run['spawn_started_ns'],playback_anchor_ns=None if mapping is None else mapping['monotonic_anchor_ns'],
+        activation_started_ns=activation,child_spawn_started_ns=run['spawn_started_ns'],playback_anchor_ns=handshake['anchor_monotonic_ns'],
         source_finished_ns=source_finished,child_cleanup_finished_ns=cleanup_finished,process_reaped_ns=run['process_reaped_ns'],
         parent_resources_closed_ns=run['parent_resources_closed_ns'],operational_closed=bool(operational),external_work_closed=external_closed,
         worker_inventory_sha256=digest(work),native_terminal_sha256=parent['terminal_sha256'],parent_receipt_inventory_sha256=digest(sorted(receipts,key=lambda r:r['task_id'])),

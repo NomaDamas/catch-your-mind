@@ -13,7 +13,7 @@ from test_recording_lifetime_ledger import runview,lifetime
 from test_recording_exposure_report import quality_fixture
 
 
-def incomplete_collection(store,count=24):
+def incomplete_collection(store,count=24,*,currency='USD',currency_unit='USD.micro',received_ns=1100):
     plan,g,k,e=declarations(count);f=adapters()
     fdoc=dict(schema_version=1,kind='recording_financial_adapters',adapters=list(f.adapters))
     u=dict(schema_version=2,evaluation_mode='matched_source_exposure_full_lifetime_v2',
@@ -35,7 +35,7 @@ def incomplete_collection(store,count=24):
             native_terminal_sha256=None,violations=('missing_native_prefix',))
         runs.append(run);life=lifetime(run);life.update(state='incomplete',resource_intervals=covref)
         lives.append(store.write('ledger/lifetime-%03d.json'%n,life))
-        document=invoice();document.update(invoice_id='original-'+sid,currency_unit='USD.micro')
+        document=invoice();document.update(invoice_id='original-'+sid,currency=currency,currency_unit=currency_unit)
         line=document['lines'][0];line.update(stream_id=sid,resource_id='resource-'+sid,quantity=4,source_quantity=ratio(4),
             operation_key=dict(invocation_ordinal=n,binding_index=0,call_ordinal=0))
         source=store.write_invoice(document);sources.append(dict(source_document=source))
@@ -43,14 +43,15 @@ def incomplete_collection(store,count=24):
         evidence=dict(schema_version=1,kind='recording_financial_evidence',adapter_id='fixture',adapter_inventory_sha256=f.digest,
             origin='synthetic_fixture',source_document=source,provider='fixture',revision='v1',account_scope='study',
             invoice_id=document['invoice_id'],line_id=line['line_id'],claim_sha256=claim,owner_instance=owner,stream_id=sid,
-            quantities=dict(vlm=ratio(4)),billed_atomic=4,currency='USD',currency_unit='USD.micro',service_start_ns=None,
-            service_end_ns=None,service_event_ns=101,observed_received_ns=1100,finality_evidence_sha256=None)
+            quantities=dict(vlm=ratio(4)),billed_atomic=4,currency=currency,currency_unit=currency_unit,service_start_ns=None,
+            service_end_ns=None,service_event_ns=101,observed_received_ns=received_ns,finality_evidence_sha256=None)
         evidences.append(evidence)
         entries.append(dict(stream_id=sid,component_id='vlm',resource_id='resource-'+sid,lane_id='vlm',start_ns=None,end_ns=None,
             event_ns=101,identity=dict(kind='invoice',provider='fixture',revision='v1',account_scope='study',invoice_id=document['invoice_id'],
                 document_sha256=source['file_sha256'],line_id=line['line_id']),source_quantity=ratio(4),quantity=4,status='settled',
             billed_amount=4,evidence_sha256='9'*64,operation_instance=owner,lifecycle_work_ref=None,received_ns=1100,
             financial_evidence_sha256=digest(evidence)))
+        entries[-1]['received_ns']=received_ns
     costpage=store.write('ledger/cost-000000.json',dict(schema_version=2,kind='recording_cost_lines',page_ordinal=0,
         previous_page_sha256=None,entries=entries))
     for n,run in enumerate(runs):
@@ -84,6 +85,14 @@ def incomplete_collection(store,count=24):
 
 
 class WholeLifetime(unittest.TestCase):
+    def test_original_denominations_and_observed_receipts_cannot_cross_frozen_policy_or_seal(self):
+        for override,reason in ((dict(currency='EUR'),'denomination'),
+                (dict(currency_unit='USD.cents'),'denomination'),(dict(received_ns=1201),'future receipt')):
+            with self.subTest(override=override),tempfile.TemporaryDirectory(dir=Path.cwd()) as root:
+                with FinancialArtifacts(root) as store:
+                    args=incomplete_collection(store,**override)
+                    with self.assertRaisesRegex(ValueError,reason):validate_lifetime_ledger(**args)
+
     def test_all_twenty_four_original_groups_retained_with_known_money_and_unknown_native_prefix(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as root:
             with FinancialArtifacts(root) as store:
