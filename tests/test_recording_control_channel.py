@@ -111,6 +111,14 @@ asyncio.run(run())'''
         await child.abort();await parent.abort()
         self.assertFalse(parent.status()['terminal_seen'])
 
+    async def test_completed_handshake_survives_later_owned_abort(self):
+        parent,child=await self.started()
+        before=parent.handshake()
+        await parent.abort()
+        self.assertEqual(parent.handshake(),before)
+        self.assertEqual(parent.handshake()['state'],'started')
+        self.assertEqual(parent.status()['failure'],'cancelled')
+
     async def test_repeated_abort_closes_blocked_writer_and_joins_all_tasks(self):
         parent,child=await self.started()
         real=asyncio.get_running_loop().sock_sendall;entered=asyncio.Event()

@@ -326,7 +326,9 @@ class _Endpoint:
 
     def handshake(self):
         if self.side!='parent':raise ValueError('handshake evidence belongs to parent')
-        b=self.bootstrap;started=all(v is not None for v in (self.ready_received_ns,self.start_send_begin_ns,self.start_send_complete_ns,self.playback_received_ns,self.anchor_monotonic_ns)) and not self._failure
+        # Completion of this historical handshake survives later child/run
+        # failure or parent cleanup. Those failures belong to channel/run rows.
+        b=self.bootstrap;started=all(v is not None for v in (self.ready_received_ns,self.start_send_begin_ns,self.start_send_complete_ns,self.playback_received_ns,self.anchor_monotonic_ns)) and self._failure not in ('clock_mismatch','invalid_mapping')
         reason='completed' if started else self._failure if self._failure in ('clock_mismatch','invalid_mapping') else 'startup_timeout' if self._failure=='timeout' else 'start_write_failed' if self._failure=='write_failed' else 'protocol_failed'
         return dict(schema_version=1,kind='recording_handshake',execution_sha256=b['execution_sha256'],nonce=b['nonce'],
             clock_domain=b['clock_domain'],clock_implementation=self._clock_implementation or time.get_clock_info('monotonic').implementation,
