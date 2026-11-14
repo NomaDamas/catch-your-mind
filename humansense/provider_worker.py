@@ -101,6 +101,12 @@ def _construct(profile, config):
     elif profile == 'qwen3.asr':
         from .providers.qwen_asr import QwenStreamingASR
         provider = QwenStreamingASR.from_local(**config)
+    elif profile == 'geometry.ground_plane':
+        from .providers.ground_plane import GroundPlane
+        provider = GroundPlane(config)
+    elif profile == 'rfdetr.tennis_image':
+        from .providers.tennis_image import TennisImageTask
+        provider = TennisImageTask.from_local(config)
     elif profile == 'rfdetr.compensated_trajectories':
         from .providers.compensated_trajectories import CompensatedTrajectories
         provider = CompensatedTrajectories.from_local(config)

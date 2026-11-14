@@ -3,6 +3,12 @@ from .capabilities import bounded_json
 
 
 def capability(profile, config):
+    if profile == 'geometry.ground_plane':
+        from .providers.ground_plane import GroundPlane
+        return GroundPlane.capability(config)
+    if profile == 'rfdetr.tennis_image':
+        from .providers.tennis_image import TennisImageTask
+        return TennisImageTask.capability(config)
     if profile == 'pg.physical.local':
         from .pg_physical_process import capability as pg_capability
         return pg_capability(config)

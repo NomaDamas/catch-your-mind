@@ -106,16 +106,47 @@ Evidence storage and later image retrieval belong to the caller.
 `geometry` exposes transform direction, current/previous capture provenance,
 anchor identity, fit diagnostics, OpenCV/detector/config identity and separate
 complete-snapshot status. Retention is at most8tracks×8observed samples. Context
-contains no raw pixels/features. User delivery cadence is unchanged. Existing
-fixed-image ROI/line rules are deliberately unavailable in this new profile:
-after re-anchoring those same numbers would no longer describe the same court
-region. Future rules must explicitly bind/rebind their reference; the original
-stationary image-event provider remains available.
+contains no raw pixels/features. User delivery cadence is unchanged. Optional
+`event_reference` binds image rules to one exact original anchor capture:
+
+```python
+config['event_reference'] = {
+    'id': 'court-view-1', 'source_id': 'cam', 'sensor_id': 'rgb',
+    'coordinate_frame': 'image', 'calibration_id': None,
+    'image_size': [1920, 1080], 'timestamp_ms': original_capture_ms,
+    'capture_sequence': original_capture_sequence,
+    'evidence_sha256': original_anchor_evidence_sha256,
+    'rules': [{'id': 'line', 'kind': 'line', 'start': [.5, .1], 'end': [.5, .9]}],
+}
+```
+
+The hash uses this profile's exact original-pixel hash format above. The
+reference must be supplied before opening the worker; it is not derived from a
+later output and silently attached to an earlier frame. Rules evaluate the
+existing estimated `anchor_projection` histories, preserving original object
+and sample indices. Resolve events against the same output's objects and rule
+summary. `collecting_anchor` means the exact reference capture matched but
+camera geometry is still warming up. `bound_estimated_anchor` permits candidate
+evaluation; it does not verify the camera transform or physical event.
+
+A gap, cut, geometry change, invalid fit or composition horizon creates another
+anchor. Its events become `reference_unbound`; old numeric rules cannot silently
+describe the new view. To rebind, explicitly reopen with the new anchor's exact
+capture identity and rules in that anchor's coordinates. The capability version
+changes. Replaying the same original capture in that newly configured worker
+provides its first anchor; a current stream must provide a new explicitly
+selected anchor capture. No model installation or implicit rule reprojection is
+performed. Providers without `event_reference` keep their original schema and
+`unavailable_reference_rules_not_bound` behavior.
 
 Tests run real OpenCV on rendered images and actual owned worker/Context/MCP
 transport with an explicitly synthetic detector. They cover transform direction,
 resize, independent object motion, cut/support failures, original preservation,
 segment boundaries, bounded output, cancellation and clear. They do not establish
 trained sports tracking accuracy, realtime device performance or VLM cost savings.
-#260 is this software path; #134 retains calibrated court mapping, reference-aware
-task packs, fast small-object/occlusion work and real held-out evaluation.
+#260 is the original software path. #134 retains actual calibrated court,
+trained small-object/occlusion and real held-out evaluation evidence.
+
+The [tennis task pack](tennis-image-task.md) supports stationary and conditional
+compensated references with explicit population/ball envelopes and abstention.
+It does not verify camera assumptions, ball identity or sports accuracy.
