@@ -32,8 +32,44 @@ open/close path joins its read thread despite repeated cancellation.
 
 U1 rejects every prospective numeric input. U2 requires exact K2/G/E2/F input
 files and the separately validated Q2/I3 entrypoint; prior structural inputs are
-never upgraded. The F fixed-path addition must receive the pending independent
-contract approval before runtime activation. Every invocation and every original
-recording remains present, including20-recording synthetic feasibility fixtures;
+never upgraded. The F fixed-path addition is specified in the independently approved
+[synthetic charge input contract](recording-runtime-charge-scenarios.md).
+Runtime activation still requires the complete original charge-scenario inventory
+and exact SDK/controller ownership; contract approval is not evidence of an
+actual vendor payment or a completed numerical evaluation. Every invocation and
+every original recording remains present, including20-recording synthetic
+feasibility fixtures;
 these fixtures establish structural admission, not real recording independence,
 model quality, monetary acceptance, or cost/latency savings.
+
+
+## Running the persistent collection
+
+Run from a repository checkout containing the integrated runtime and validator;
+the SDK wheel packages `humansense`, not the `benchmarks` modules. The fixed
+parent entry point consumes a prepared input root; it does not construct a dataset, install
+models or choose an accounting policy. Actual evaluation and dataset acquisition
+must run on GCP under the repository policy. Local synthetic software tests do
+not establish measured product savings.
+
+```sh
+python -m benchmarks.recording_coordinator \
+  --runtime-inputs /absolute/private/frozen-inputs \
+  --expected-execution-sha256 ORIGINAL_INVOCATION_ZERO_EXECUTION_SHA256 \
+  --output /absolute/private/new-results \
+  --retain-evaluation-artifacts
+```
+
+Replace the SHA placeholder with the original canonical execution-object digest
+for invocation zero, not a digest of a later result or a guessed file hash. The
+[input contract](recording-runtime-input-root.md) describes the fixed inventory
+and canonical representation. The
+output directory must not already exist. Add `--retain-financial-documents` only
+when this consent matches the frozen scope policy; the runtime refuses a mismatch.
+
+The parent runs every frozen invocation in order, waits for the owned child to
+be reaped before starting another, and retains original executions and run
+references in `execution-inventory.json`. A structural result does not establish
+numerical eligibility. The matched-source evaluator additionally needs all
+original validated runs, financial evidence and separately reviewed assessments;
+missing receipts and failed runs cannot be dropped to obtain a passing result.
