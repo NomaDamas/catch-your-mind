@@ -2,6 +2,7 @@
 import asyncio
 from copy import deepcopy
 import hashlib
+import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
@@ -12,15 +13,16 @@ from benchmarks.recording_native_schema import digest as original_digest,run_con
 from benchmarks.recording_native_writer import ArtifactBudget,RecordingNativeWriter
 from benchmarks.recording_evaluation import RecordingEvaluationSession
 from benchmarks.recording_runtime_native import validate_runtime_native_inventory
-from benchmarks.recording_transports import FixtureCompletion,TransportCapacity,TransportMemoryBudget
+from benchmarks.recording_transports import FixtureCompletion,LocalChatCompletions,TransportCapacity,TransportMemoryBudget
 from benchmarks.recording_runtime_finance import (SCENARIOS_PATH,open_fixture_receipts,
     validate_runtime_charge_scenarios)
 from benchmarks.replay_clock import ReplayClock
 from recording_numeric_fixtures import prospective
 import test_text_context_call as text_tests
+from test_recording_transports import Server,Sink,dependencies,real_adapter,HTTP_DEPS
 
 
-def fixture(unknown=False):
+def fixture(unknown=False,real_spec=None):
     ds,l,bundles,numeric,responses,scenarios=prospective();d=ds[0]
     budget=dict(unit='USD.micro',pricing_revision='v1',ceiling=100,max_calls=256,max_inflight=4,receipt_limit=128)
     if unknown:
@@ -28,11 +30,14 @@ def fixture(unknown=False):
     u=d['runtime_policy'];c=d['collection'];q=d['scope_protocol'];i=d['instrumentation_protocol']
     for arm in u['arms']:
         for controller in arm['controllers']:controller['budget_sha256']=original_digest(budget)
-    u['adapters'][0]['config']['responses_sha256']=original_digest(responses)
+    if real_spec is None:u['adapters'][0]['config']['responses_sha256']=original_digest(responses)
+    else:u['adapters'][0]={**deepcopy(real_spec),'adapter_id':'fixture'}
     c['runtime_policy_sha256']=original_digest(u)
     for arm in c['arms']:
         for binding in arm['provider_bindings']:
-            if binding['operation_kinds']==['semantic']:binding['config_sha256']=original_digest(u['adapters'][0]['config'])
+            if binding['operation_kinds']==['semantic']:
+                binding.update(config_sha256=original_digest(u['adapters'][0]['config']),
+                    provider=u['adapters'][0]['provider'],model_revision=u['adapters'][0]['model_revision'])
     q['collection_sha256']=original_digest(c)
     i.update(collection_sha256=original_digest(c),scope_protocol_sha256=original_digest(q))
     execution=dict(schema_version=1,kind='recording_execution',runtime_policy_sha256=original_digest(u),
@@ -43,6 +48,7 @@ def fixture(unknown=False):
         'runtime/accounting.json':d['stream_protocol'],'runtime/financial-adapters.json':numeric['financial_adapter_inventory'],
         'responses/000.json':responses,'budgets/000.json':budget,SCENARIOS_PATH:dict(schema_version=1,
             kind='recording_synthetic_charge_scenarios',scenarios=scenarios)}
+    if real_spec is not None:docs.pop('responses/000.json');docs[SCENARIOS_PATH]['scenarios']=[]
     return d,l,bundles,numeric,docs,execution
 
 
@@ -101,9 +107,9 @@ class ActualRuntimeFinance(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(list(Path(directory).iterdir()),[])
                 finally:await case.asyncTearDown()
 
-    async def execute_fixture(self,root,mode):
+    async def execute_fixture(self,root,mode,*,real_spec=None,dependency_inventory=None):
         asyncio.get_running_loop().slow_callback_duration=2
-        d,l,bundles,numeric,docs,execution=fixture(unknown=mode=='unknown')
+        d,l,bundles,numeric,docs,execution=fixture(unknown=mode=='unknown',real_spec=real_spec)
         case=text_tests.Calls();await case.asyncSetUp();observer=None;client=None;owner=None;adapter=None
         budget=ArtifactBudget();memory=TransportMemoryBudget(32*1024**2)
         writer=await RecordingNativeWriter.open(root/'native',run_context(d,'1'*64,0))
@@ -116,11 +122,15 @@ class ActualRuntimeFinance(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(owner.recorders),1)
             self.assertEqual(owner.actual_settlements(),());self.assertEqual(list(finance.iterdir()),[])
             spec=docs['runtime/policy.json']['adapters'][0]
-            client=await FixtureCompletion.open(spec,docs['responses/000.json'],invocation_ordinal=0,lane_id='answer',binding_index=0,
-                context=dict(observer.context),capacity=TransportCapacity(262144),memory=memory,receipt_router=owner.router)
+            if real_spec is None:
+                client=await FixtureCompletion.open(spec,docs['responses/000.json'],invocation_ordinal=0,lane_id='answer',binding_index=0,
+                    context=dict(observer.context),capacity=TransportCapacity(262144),memory=memory,receipt_router=owner.router)
+            else:
+                client=await LocalChatCompletions.open(spec,invocation_ordinal=0,lane_id='answer',binding_index=0,context=dict(observer.context),
+                    dependency_inventory=dependency_inventory,sink=Sink(),capacity=TransportCapacity(262144),memory=memory)
             observer.bind_semantic_lane(case.c,0);observer.bind_backend(0,client,'callback')
             clock=ReplayClock(d['source_manifest']);observer.bind_mapping(clock.mapping,clock.sha256)
-            adapter=TextContextCalls(case.h,'main',client,provider='test.fixture',model_revision='1',evaluation_observer=observer)
+            adapter=TextContextCalls(case.h,'main',client,provider=spec['provider'],model_revision=spec['model_revision'],evaluation_observer=observer)
             rid,record=await case.queued();decision=next(row['decision'] for row in case.c.snapshot()['requests'] if row['id']==rid)
             owner.register_request(0,rid,decision['decision_sha256'])
             if mode=='cancel':
@@ -134,7 +144,7 @@ class ActualRuntimeFinance(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(entered.wait(),5);task.cancel()
                 with self.assertRaises(asyncio.CancelledError):await task
             else:self.assertTrue((await task)['accepted'])
-            if mode=='unknown':
+            if mode in ('unknown','real_unknown'):
                 self.assertEqual(owner.actual_settlements(),());self.assertEqual(owner.retained_references(),())
                 self.assertEqual(case.c.snapshot()['budget']['reserved_liability'],10)
             else:
@@ -164,6 +174,14 @@ class ActualRuntimeFinance(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancellation_retains_original_entered_known_charge(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:await self.execute_fixture(Path(directory).resolve(),'cancel')
+
+    @unittest.skipUnless(all(importlib.util.find_spec(name) for name in HTTP_DEPS),'optional owned HTTP dependencies absent')
+    async def test_real_owned_http_callback_never_becomes_synthetic_settled_money(self):
+        async with Server() as server:
+            inventory=dependencies()
+            with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+                await self.execute_fixture(Path(directory).resolve(),'real_unknown',real_spec=real_adapter(server,inventory),dependency_inventory=inventory)
+                self.assertEqual(len(server.requests),1)
 
     async def test_unknown_row_keeps_actual_liability_and_creates_no_invoice(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:await self.execute_fixture(Path(directory).resolve(),'unknown')
