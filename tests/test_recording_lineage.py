@@ -5,7 +5,7 @@ from humansense.native_operation import NativeOperationRef
 from humansense.recording_scope import evaluation_lineage
 from humansense.schema import timestamp
 from test_recording_sdk_scopes import NativeFixture
-from test_recording_native_guards import Guards
+import test_recording_native_guards as guard_tests
 import test_text_context_call as text_tests
 
 
@@ -53,8 +53,8 @@ class TextLineage(NativeFixture, unittest.IsolatedAsyncioTestCase):
 
 
 class DirectReference(unittest.IsolatedAsyncioTestCase):
-    recording = Guards.recording
-    ticket = Guards.ticket
+    recording = guard_tests.Guards.recording
+    ticket = guard_tests.Guards.ticket
 
     async def test_direct_callback_reference_is_absent_until_actual_entry(self):
         owner, writer, callback, calls, good, bad = await self.recording()

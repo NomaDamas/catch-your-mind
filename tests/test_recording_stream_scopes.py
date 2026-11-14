@@ -39,7 +39,7 @@ class AsyncProvider(Provider):
 
 
 class Streams(unittest.IsolatedAsyncioTestCase):
-    async def setup(self,factory,*,capacity=2):
+    async def setup(self,factory,*,capacity=2,publication_sink=None):
         directory=tempfile.TemporaryDirectory(dir='.')
         self.addCleanup(directory.cleanup);self.root=Path(directory.name).resolve()
         d=declarations(self.root,provider='fixture.stream',revision='1',role='signal',boundary='in_process_backend')
@@ -52,7 +52,7 @@ class Streams(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(self.observer.close)
         self.clock=ReplayClock(d['source_manifest']);self.scope=self.observer.stream_scope(0)
         self.human=HumanSense(consent=True);self.addAsyncCleanup(self.human.close)
-        self.runtime=SensorStreams(self.human,capacity=capacity)
+        self.runtime=SensorStreams(self.human,capacity=capacity,evaluation_publication_sink=publication_sink)
         self.spec=CapabilitySpec('fixture.audio','fixture.audio','audio','fixture.stream','1',
             (OutputField('count','integer'),OutputField('value','object')),'native',
             stateful=True,reset_on_gap=True)

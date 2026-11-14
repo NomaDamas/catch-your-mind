@@ -15,6 +15,7 @@ from .capabilities import CapabilitySpec, SensorMetadata, bounded_json, identifi
 from .plugins import InputFrame
 from .schema import timestamp
 from .recording_scope import RecordingScope, evaluation_owner
+from .evaluation_publication import AcceptedObservationSink
 
 
 class _EntryRevoked(Exception):
@@ -135,11 +136,15 @@ and reset()/close() as needed. Synchronous methods run off the event loop.
 This is an additional typed-input path; legacy MediaRouter remains compatible.
 """
     def __init__(self, human, *, capacity=2, max_streams=16,
-                 max_packet_bytes=4*1024*1024, max_buffer_bytes=64*1024*1024):
+                 max_packet_bytes=4*1024*1024, max_buffer_bytes=64*1024*1024,
+                 evaluation_publication_sink=None):
         for value, maximum in ((capacity, 64), (max_streams, 64),
                                (max_packet_bytes, 32*1024*1024), (max_buffer_bytes, 256*1024*1024)):
             if type(value) is not int or not 1 <= value <= maximum:
                 raise ValueError('invalid stream resource bound')
+        if evaluation_publication_sink is not None and not isinstance(evaluation_publication_sink, AcceptedObservationSink):
+            raise TypeError('typed accepted-observation sink required')
+        self._evaluation_publication_sink = evaluation_publication_sink
         self.manager_id = uuid.uuid4().hex
         self.human, self.capacity, self.max_streams = human, capacity, max_streams
         self.max_packet_bytes, self.max_buffer_bytes = max_packet_bytes, max_buffer_bytes
@@ -300,6 +305,8 @@ This is an additional typed-input path; legacy MediaRouter remains compatible.
         if (type(bindings) is not dict or set(bindings)-set(ids) or
                 type(configurations) is not dict or set(configurations) != set(bindings)):
             raise ValueError('explicit observed capability bindings and configurations must match')
+        if self._evaluation_publication_sink is not None and set(bindings) != set(ids):
+            raise ValueError('publication export requires every explicit recording binding')
         bindings = dict(bindings)
         configurations = {key: bounded_json(value) for key, value in configurations.items()}
         for spec in specs:
@@ -484,7 +491,7 @@ This is an additional typed-input path; legacy MediaRouter remains compatible.
                 if not valid():
                     continue
                 if result is not None:
-                    await self._publish(lane, result, frame, frame.sensor.sequence)
+                    await self._publish(lane, result, frame, frame.sensor.sequence, ticket=ticket)
                 if ticket is not None:
                     ticket.published(result is not None)
                 lane['last_capture'] = (replace(frame, data=None), generation, reference)
@@ -516,7 +523,13 @@ This is an additional typed-input path; legacy MediaRouter remains compatible.
                     self.buffer_bytes -= size
                     queue.task_done()
 
-    async def _publish(self, lane, result, frame, minimum_sequence):
+    async def _publish(self, lane, result, frame, minimum_sequence, *, ticket=None):
+        reference = None
+        if self._evaluation_publication_sink is not None:
+            from .native_operation import NativeOperationRef
+            reference = None if ticket is None else ticket.entry_reference()
+            if type(reference) is not NativeOperationRef:
+                raise ValueError('publication export requires its actual entered operation')
         # Capture order belongs to the provider input. Publication also includes
         # no-input control results, so its sequence must advance independently.
         sequence = max(minimum_sequence, lane['output_sequence']+1)
@@ -525,7 +538,7 @@ This is an additional typed-input path; legacy MediaRouter remains compatible.
             capture_sequence = frame.sensor.sequence
         sensor = replace(frame.sensor, sequence=sequence, capture_sequence=capture_sequence)
         try:
-            await self.human.push_observation(lane['spec'].id, result, sensor=sensor,
+            record = await self.human.push_observation(lane['spec'].id, result, sensor=sensor,
                 subject_id=frame.subject_id, timestamp_ms=frame.timestamp_ms)
         except BaseException:
             discard = getattr(lane['provider'], 'discard_separation_result', None)
@@ -533,6 +546,12 @@ This is an additional typed-input path; legacy MediaRouter remains compatible.
                 discard(result)
             raise
         lane['output_sequence'] = sequence
+        if self._evaluation_publication_sink is not None:
+            # Publication already happened. A failed exporter must not turn this
+            # accepted SDK observation into a falsely discarded native event.
+            ticket.published(True)
+            self._evaluation_publication_sink.record(bounded_json(record, max_bytes=131072),
+                reference)
 
     async def endpoint(self, source_id, sensor_id, capability_id, *, stream_epoch, after_sequence=None):
         """Finalize one lane after an exact accepted-input barrier; keep capture open."""
@@ -594,7 +613,7 @@ This is an additional typed-input path; legacy MediaRouter remains compatible.
             if not valid():
                 return
             if result is not None:
-                await self._publish(lane, result, frame, control['sequence']+1)
+                await self._publish(lane, result, frame, control['sequence']+1, ticket=ticket)
             if ticket is not None:
                 ticket.published(result is not None)
             outcome = {'published': result is not None, 'closed': False,
@@ -693,7 +712,7 @@ This is an additional typed-input path; legacy MediaRouter remains compatible.
                             skipped.append(lane['spec'].id)
                             continue
                         if result is not None:
-                            await self._publish(lane, result, frame, stream['sequence']+1)
+                            await self._publish(lane, result, frame, stream['sequence']+1, ticket=ticket)
                             published.append(lane['spec'].id)
                         if ticket is not None:
                             ticket.published(result is not None)
