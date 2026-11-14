@@ -18,7 +18,7 @@ ASSUMPTION='approximately-similarity-static-background'
 def configuration(value):
     value=bounded_json(value,max_bytes=8192)
     required={'path','sha256','background_roi','operating_assumption'}
-    if type(value) is not dict or not required<=set(value) or set(value)-required-{'device','max_gap_ms'}:
+    if type(value) is not dict or not required<=set(value) or set(value)-required-{'device','max_gap_ms','event_reference'}:
         raise ValueError('exact explicit compensated trajectory configuration required')
     if type(value['path']) is not str or not value['path'] or type(value['sha256']) is not str or re.fullmatch('[0-9a-f]{64}',value['sha256']) is None:
         raise ValueError('local checkpoint path/hash required')
@@ -27,6 +27,9 @@ def configuration(value):
     result.setdefault('device','cpu');result.setdefault('max_gap_ms',1000)
     if result['device'] not in ('cpu','cuda','mps') or type(result['max_gap_ms']) is not int or not 1<=result['max_gap_ms']<=1000:
         raise ValueError('bounded device/gap policy required')
+    if 'event_reference' in result:
+        from .anchor_events import configuration as reference_configuration
+        result['event_reference'] = reference_configuration(result['event_reference'])
     return result
 
 
@@ -37,7 +40,8 @@ class CompensatedTrajectories:
         digest=hashlib.sha256(json.dumps(config,sort_keys=True,separators=(',',':')).encode()).hexdigest()
         return CapabilitySpec('vision.rfdetr.compensated_trajectories','vision.trajectories','video',
             'gamst.rfdetr.compensated_trajectories','1.'+digest,
-            (OutputField('detections','array'),OutputField('objects','array'),OutputField('geometry','object')),
+            (OutputField('detections','array'),OutputField('objects','array'),OutputField('geometry','object')) +
+            (() if 'event_reference' not in config else (OutputField('events','array'),OutputField('event_summary','object'))),
             'frame',stateful=True,reset_on_gap=True,freshness_ms=config['max_gap_ms'],interpretation='estimate',
             devices=('cpu','cuda','mps'),sensor_requirements=('uint8-bgr-camera','declared-static-background'),license='Apache-2.0')
 
@@ -61,6 +65,12 @@ class CompensatedTrajectories:
 
     def reset(self):
         with self.lock:self._clear()
+
+    def discard_object_continuity(self):
+        """Abstain across missing task evidence while preserving camera reference."""
+        with self.lock:
+            self.paths = {}
+            self.detector.reset()
 
     def close(self):
         with self.lock:
@@ -140,7 +150,8 @@ class CompensatedTrajectories:
         detected=self.detector._associate_rows(*batch,association_boxes=projected_boxes,visible_only=True)
         mapping=dict(capture_sequence=seq,timestamp_ms=ts,evidence_sha256=digest,
                      current_to_anchor_pixels=self.to_anchor.tolist())
-        mappings=(self.mappings+[mapping])[-8:]
+        history_limit = 3 if 'event_reference' in self.config else 8
+        mappings=(self.mappings+[mapping])[-history_limit:]
         pending={};objects=[]
         for item in detected['objects'] if complete else []:
             key=item['track_id'];box=item['location']['bbox']
@@ -152,7 +163,7 @@ class CompensatedTrajectories:
                 kind='observed_with_estimated_projection')
             prior=self.paths.get(key) if valid else None
             segment=prior['segment_id'] if prior else uuid.uuid4().hex
-            history=(prior['observations']+[sample])[-8:] if prior else [sample]
+            history=(prior['observations']+[sample])[-history_limit:] if prior else [sample]
             velocity=interval=None
             if prior:
                 last=prior['observations'][-1];dt=(ts-last['timestamp_ms'])/1000
@@ -181,7 +192,12 @@ class CompensatedTrajectories:
             diagnostics=diagnostics,operating_assumption=self.config['operating_assumption'],
             background_roi=self.config['background_roi'],events_status='unavailable_reference_rules_not_bound',
             opencv_version=self.motion.cv.__version__,config_version=self.spec.version)
-        result=self.spec.validate(dict(detections=detected['objects'],objects=objects,geometry=geometry))
+        result=dict(detections=detected['objects'],objects=objects,geometry=geometry)
+        if 'event_reference' in self.config:
+            from .anchor_events import evaluate
+            result.update(evaluate(result,self.config['event_reference']))
+            geometry['events_status']=result['event_summary']['status']
+        result=self.spec.validate(result)
         if complete:
             self.paths=pending;self.mappings=mappings;self.previous=gray;self.boxes=current_boxes
             self.owner=owner;self.last=(ts,seq,digest)

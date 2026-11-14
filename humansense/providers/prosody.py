@@ -3,6 +3,7 @@ import math
 
 from ..capabilities import CapabilitySpec, OutputField
 from ..plugins import _pcm_floats
+from .prosody_features import spectral_features,cycle_features
 
 
 class AudioProsody:
@@ -36,7 +37,7 @@ class AudioProsody:
     def capability(cls, *, window_ms=80):
         if type(window_ms) is not int or not 40 <= window_ms <= 250:
             raise ValueError('invalid feature window')
-        return CapabilitySpec('audio.prosody', 'audio.features', 'audio', 'humansense.audio_dsp', '1',
+        return CapabilitySpec('audio.prosody', 'audio.features', 'audio', 'humansense.audio_dsp', '2',
             (OutputField('features', 'object'),), 'window', window_ms=window_ms,
             stateful=True, reset_on_gap=True, freshness_ms=1000, interpretation='estimate',
             devices=('cpu',), sensor_requirements=('normalized-pcm',), license='Apache-2.0')
@@ -130,10 +131,13 @@ class AudioProsody:
                     if abs(divisor) > 1e-12:
                         lag += float(.5*(left-right)/divisor)
                     pitch = float(min(self.max_pitch_hz, max(self.min_pitch_hz, rate/lag)))
+        clipping=float(np.mean(np.abs(samples)>=.999))
         return {'features': dict(rms=rms, dbfs=20*math.log10(rms) if rms > 0 else None,
             ac_rms=ac_rms, pitch_hz=pitch, periodicity_score=periodicity,
             periodic_signal_candidate=pitch is not None, spectral_centroid_hz=centroid,
-            clipping_fraction=float(np.mean(np.abs(samples) >= .999)),
+            clipping_fraction=clipping,
+            spectral=spectral_features(np,samples,rate),
+            cycles=cycle_features(np,samples,rate,pitch,periodicity,clipping),
             sample_rate=rate, window_samples=count, window_ms=count*1000/rate,
             channel=self.channel if self.channel is not None else 0,
             interpretation='signal_features_not_emotion_or_spl')}

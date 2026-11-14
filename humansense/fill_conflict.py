@@ -16,6 +16,7 @@ from .schema import timestamp
 from .smolvlm_call import smolvlm_frame_sha256
 from .streams import _finish
 from .visual_context_call import VisualContextCalls
+from .fill_evaluation import FillEvaluationContext
 
 
 def _client(human,controller_id,value,timeout,observer):
@@ -116,7 +117,7 @@ class FillConflictRuntime:
             original_evidence_age_ms=None if case is None else now-case['capture_ms'],cleanup_pending=self._close_task is not None and not self._close_task.done(),
             history_limit=32,rule_sha256=RULE_SHA,executes_model=False),max_bytes=65536)
 
-    async def inspect(self,frame):
+    async def inspect(self,frame,*,evaluation_context=None):
         self.human._check()
         if self.closed:raise RuntimeError('inspection driver closed')
         import numpy as np
@@ -142,10 +143,13 @@ class FillConflictRuntime:
         if self._last is not None and (order[0]<=self._last[0] or order[1]<=self._last[1]):raise ValueError('new case requires newer original capture')
         if self._superseded_order is not None and (order[0]<self._superseded_order[0] or order[1]<self._superseded_order[1]):
             raise ValueError('capture predates observed superseding capture')
+        if evaluation_context is not None:
+            if not isinstance(evaluation_context,FillEvaluationContext):raise TypeError('typed recording fill context required')
+            evaluation_context.validate(self,frame)
         pixels=frame.data.copy();pixels.setflags(write=False);frame=replace(frame,data=pixels)
         self._superseded_order=None;self._owner=owner;self._last=order
         generation=(self._generation,self.human._generation)
-        task=asyncio.create_task(self._run_case(frame,generation));self._operation=task
+        task=asyncio.create_task(self._run_case(frame,generation,evaluation_context));self._operation=task
         try:return await asyncio.shield(task)
         except asyncio.CancelledError:
             task.cancel();await _finish(asyncio.gather(task,return_exceptions=True));raise
@@ -153,9 +157,12 @@ class FillConflictRuntime:
             if self._operation is task:self._operation=None
             self._case=None
 
-    async def _run_case(self,frame,generation):
-        requests=[]
-        try:return await self._inspect(frame,generation,requests)
+    async def _run_case(self,frame,generation,evaluation_context):
+        requests=[];outcome='failed'
+        try:
+            result=await self._inspect(frame,generation,requests,evaluation_context)
+            outcome='completed';return result
+        except asyncio.CancelledError:outcome='cancelled';raise
         finally:
             # Release only this case's never-dispatched work. Dispatched unknown
             # bills retain their controller-owned liability and receipt identity.
@@ -164,6 +171,9 @@ class FillConflictRuntime:
                 row=pending.get(request_id)
                 if row is not None and row['state']!='dispatched':
                     self.controller.cancel(request_id,now_ms=timestamp())
+            if evaluation_context is not None:
+                if self._case is not None:evaluation_context.partial(bounded_json(self._case,max_bytes=16384),outcome)
+                evaluation_context.closed(outcome)
 
     async def _execute_stage(self,adapter,args,kwargs,deadline):
         # One absolute case deadline; cancellation joins the real adapter's
@@ -179,7 +189,7 @@ class FillConflictRuntime:
             if not task.done():
                 task.cancel();await _finish(asyncio.gather(task,return_exceptions=True))
 
-    async def _inspect(self,frame,generation,requests):
+    async def _inspect(self,frame,generation,requests,evaluation_context):
         self._check(generation);case_id=uuid.uuid4().hex;started=asyncio.get_running_loop().time()
         image_sha=smolvlm_frame_sha256(frame.data)
         case=dict(id=case_id,capture_ms=frame.timestamp_ms,source_sha256=image_sha,stage='measurement',attempts=[],rule_sha256=RULE_SHA,
@@ -187,7 +197,10 @@ class FillConflictRuntime:
                 shape=list(frame.data.shape),roi_px=list(self.config['roi']),container_id=self.config['container_id'],
                 configuration_sha256=self._config_sha,processing_epoch=f'{self.human._session_id}:{self.human._generation}'))
         self._case=case
-        self._native=asyncio.create_task(asyncio.to_thread(self.fill.process,frame))
+        measure=lambda:self.fill.process(frame)
+        if evaluation_context is not None:
+            raw_measure=measure;measure=lambda:evaluation_context.measure(raw_measure)
+        self._native=asyncio.create_task(asyncio.to_thread(measure))
         try:
             try:numeric=await asyncio.shield(self._native)
             except asyncio.CancelledError:
@@ -196,6 +209,7 @@ class FillConflictRuntime:
         self._check(generation)
         case['fill_processing_ms']=round((asyncio.get_running_loop().time()-started)*1000,3)
         measurement=await self.human.push_observation(self.fill.spec.id,numeric,sensor=frame.sensor,subject_id=frame.subject_id,timestamp_ms=frame.timestamp_ms)
+        if evaluation_context is not None:evaluation_context.published('fill_measurement',measurement)
         self._check(generation)
         c=self.config
         # No numeric result/prior model answer goes to any stage's model record.
@@ -203,6 +217,7 @@ class FillConflictRuntime:
             source_sha256=image_sha,roi_px=list(c['roi']),container_id=c['container_id'],coordinate_frame=c['coordinate_frame'],
             shape=list(frame.data.shape),config_sha256=_digest(c),producer='owned_opencv_input',identity_verified=False)),
             sensor=frame.sensor,subject_id=frame.subject_id,timestamp_ms=frame.timestamp_ms)
+        if evaluation_context is not None:evaluation_context.published('fill_descriptor',descriptor)
         self._check(generation)
         case.update(measurement_record_id=measurement['id'],measurement_sha256=_digest(measurement),descriptor_record_id=descriptor['id'],descriptor_sha256=_digest(descriptor))
         if self._source is None:self._source=self.controller.open_source(descriptor,now_ms=timestamp())
@@ -228,12 +243,25 @@ class FillConflictRuntime:
                 rid=decision['request_id'];requests.append(rid);entry['request_id']=rid
                 adapter=self.strong if stage=='strong' else self.small
                 question=prompt(stage,width=c['width'],height=c['height'],roi=c['roi'],container_id=c['container_id'],coordinate_frame=c['coordinate_frame'])
+                stage_kwargs={}
+                if evaluation_context is not None:
+                    stage_kwargs=evaluation_context.stage_arguments(stage,rid,adapter)
+                    if type(stage_kwargs) is not dict or set(stage_kwargs)!={'evaluation_scope','evaluation_relationship','evaluation_predecessor'}:
+                        raise ValueError('exact immutable recording stage ownership required')
+                    if stage_kwargs['evaluation_relationship']!={'initial':'root','reinspection':'retry','strong':'escalation'}[stage]:
+                        raise ValueError('recorded fill stage relationship differs from actual chain')
+                response=None;stage_error=None
                 try:
                     response=await self._execute_stage(adapter,(rid,descriptor,frame,question),
-                        dict(maximum_charge=self.ceilings[stage],ttl_ms=1000),started+30)
+                        dict(maximum_charge=self.ceilings[stage],ttl_ms=1000,**stage_kwargs),started+30)
                     self._check(generation)
                 except (RuntimeError,ValueError,TimeoutError) as error:
-                    self._check(generation);entry.update(status='failed',error=type(error).__name__);outcome='stage_failed';break
+                    stage_error=type(error).__name__
+                    self._check(generation);entry.update(status='failed',error=stage_error);outcome='stage_failed';break
+                except BaseException as error:
+                    stage_error=type(error).__name__;raise
+                finally:
+                    if evaluation_context is not None:evaluation_context.stage_finished(stage,rid,response,stage_error)
                 state=self.controller.snapshot()
                 actual=next((row for row in state['requests']+state['recent'] if row['id']==rid),None)
                 if actual is not None and (actual.get('last_admission') or {}).get('stage')=='dispatch' and actual['last_admission'].get('status')=='dispatched':
@@ -263,6 +291,9 @@ class FillConflictRuntime:
         self._delivery=max(self._delivery+1,frame.sensor.sequence)
         result=await self.human.push_observation(self.spec.id,value,sensor=replace(frame.sensor,sequence=self._delivery),
             subject_id=frame.subject_id,timestamp_ms=frame.timestamp_ms,quality='sufficient' if case['current_evidence'] else 'insufficient')
+        if evaluation_context is not None:
+            evaluation_context.published('fill_comparison',result)
+            evaluation_context.completed(bounded_json(case,max_bytes=16384),result)
         self._check(generation)
         self._history.append(dict(retained_ms=timestamp(),value=value))
         return result

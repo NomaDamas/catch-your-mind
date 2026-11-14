@@ -4,6 +4,12 @@ This map is part of the approved [delivery plan](perception-expansion-plan.md). 
 
 ## Evidence rules
 
+The [2026-11-15 user direction](perception-expansion-plan.md#user-directed-software-continuation-2026-11-15)
+allows the current software phase to finish before the actual experiments and
+model/sensor checks below. These remain full product acceptance gates, not passed
+checks. The [candidate execution matrix](candidate-execution-matrix.md) records
+each selected implementation and unsupported alternative separately.
+
 Each family requires an executable adapter, documented input/output contracts, repeatable validation command, actual inference or device-input evidence, and bounded streaming/lifecycle tests. Mock-backed contract tests do not prove model execution. Recorded sensor packets prove parsing, not live sensor operation. Missing hardware or checkpoints require child issues with acquisition/runtime requirements and reproduction steps; those issues block the family and overall completion. No capability silently becomes optional because it is difficult.
 
 Minimum evidence records identify commit, model/checkpoint hash, dependency versions, device, input fixture provenance, command, output, timing, limitations and reviewer. Actual hardware acquisition is not assumed authorized as a purchase; unavailable equipment remains an explicit blocker while software work continues.

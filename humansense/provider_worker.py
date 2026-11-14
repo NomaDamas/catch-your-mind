@@ -83,7 +83,10 @@ def _construct(profile, config):
     elif profile == 'l2cs.gaze':
         from .providers.gaze import L2CSGaze
         provider = L2CSGaze.from_local(**config)
-    elif profile in ('mediapipe.body.video', 'mediapipe.hand.video', 'mediapipe.face.video'):
+    elif profile == 'mediapipe.head_orientation.video':
+        from .providers.head_orientation import HeadOrientationContext
+        provider = HeadOrientationContext.from_local(**config)
+    elif profile in ('mediapipe.body.video', 'mediapipe.hand.video', 'mediapipe.face.video', 'mediapipe.gesture.video'):
         from .providers.landmarker_video import MediaPipeVideoContext
         provider = MediaPipeVideoContext.from_local(profile.split('.')[1], **config)
     elif profile == 'mediapipe.face':
@@ -101,6 +104,12 @@ def _construct(profile, config):
     elif profile == 'qwen3.asr':
         from .providers.qwen_asr import QwenStreamingASR
         provider = QwenStreamingASR.from_local(**config)
+    elif profile == 'geometry.ground_plane':
+        from .providers.ground_plane import GroundPlane
+        provider = GroundPlane(config)
+    elif profile == 'rfdetr.tennis_image':
+        from .providers.tennis_image import TennisImageTask
+        provider = TennisImageTask.from_local(config)
     elif profile == 'rfdetr.compensated_trajectories':
         from .providers.compensated_trajectories import CompensatedTrajectories
         provider = CompensatedTrajectories.from_local(config)

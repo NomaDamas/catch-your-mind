@@ -5,6 +5,11 @@ SensorStreams and Python/MCP. The `mediapipe.face` ProcessProvider profile loads
 explicit local Face Landmarker task in CPU IMAGE mode. Existing legacy face plugin
 behavior is unchanged; this adapter exposes derived context instead of raw points.
 
+The separate [head-orientation profile](head-orientation.md) combines VIDEO
+landmarks with explicitly supplied camera calibration and 3D correspondences.
+It publishes bounded model-to-camera rotation estimates; real pose accuracy
+and calibration validation remain deferred.
+
 ```python
 from humansense import ProcessProvider
 config = {'path': '/absolute/face_landmarker.task',
@@ -65,5 +70,5 @@ math, scale invariance, RGB ownership, off-image/subpixel abstention, coefficien
 bounds and missing data, exact loader bytes/options and managed publication/MCP
 retrieval. Tests use explicit detector/loader doubles and install no model weights.
 Family #20 remains open. Actual checkpoint replay/device evidence is tracked in
-[#85](https://github.com/NomaDamas/Gamst/issues/85); gaze and stateful temporal
-capabilities also remain required.
+[#85](https://github.com/NomaDamas/Gamst/issues/85); the separate gaze, VIDEO and
+head-orientation software paths do not replace those real-evidence requirements.

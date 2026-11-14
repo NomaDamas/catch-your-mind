@@ -25,8 +25,13 @@ class Metadata(unittest.TestCase):
         self.assertTrue(spec.stateful);self.assertEqual(spec.window_ms,10)
         self.assertNotEqual(spec.version,capability('webrtc.aec3',dict(stream_delay_ms=40)).version)
         for config in (dict(sample_rate=8000),dict(stream_delay_ms=-1),dict(stream_delay_ms=True),
-                       dict(speech_sensor_id='ambient'),dict(other=1)):
+                       dict(speech_sensor_id='ambient'),dict(other=1),dict(noise_suppression=1),
+                       dict(automatic_gain_control=None),dict(ns_level=True),dict(ns_level=4),
+                       dict(agc_gain_db=float('nan')),dict(agc_gain_db=21),dict(agc_max_gain_db=14),
+                       dict(agc_max_gain_db=float('inf'))):
             with self.assertRaises(ValueError):capability('webrtc.aec3',config)
+        self.assertNotEqual(spec.version,capability('webrtc.aec3',dict(noise_suppression=True)).version)
+        self.assertNotEqual(spec.version,capability('webrtc.aec3',dict(automatic_gain_control=True)).version)
         with patch('importlib.metadata.version',return_value='wrong'):
             with self.assertRaises(RuntimeError):WebRTCDuplex.from_installed()
 
@@ -116,6 +121,47 @@ class Duplex(unittest.TestCase):
         self.assertEqual(calls,[dict(sample_rate=32000,num_channels=1,stream_delay_ms=40)])
         p.reset();self.assertIsNone(p.backend);p.close()
 
+    def test_native_combined_bridge_options_and_owned_lifecycle(self):
+        # Exact retained 0.2.0 AudioProcessor constructor/process surface.
+        for rate in (16000,32000,48000):
+            for ns,agc in ((True,False),(False,True),(True,True)):
+                calls=[];created=[]
+                class Processor:
+                    def __init__(self,**kwargs):calls.append(kwargs);created.append(self);self.closed=False
+                    def process(self,near,far):
+                        self.assertions=(near.dtype,near.shape,near.flags.c_contiguous,far.flags.c_contiguous)
+                        output=(near-far)*.5;near[:]=0;far[:]=0
+                        return output
+                    def close(self):self.closed=True
+                options=dict(sample_rate=rate,stream_delay_ms=40,noise_suppression=ns,
+                    automatic_gain_control=agc,ns_level=3,agc_gain_db=2,agc_max_gain_db=25)
+                with patch('importlib.metadata.version',return_value='0.2.0'),patch.dict('sys.modules',{'pywebrtc_audio':SimpleNamespace(AudioProcessor=Processor)}):
+                    p=WebRTCDuplex.from_installed(**options)
+                    self.assertEqual(calls,[])
+                    f=frame(rate=rate);before=f.data.copy();out=p.transform(f)
+                    self.assertEqual(calls,[dict(sample_rate=rate,num_channels=1,echo_cancellation=True,
+                        noise_suppression=ns,high_pass_filter=True,auto_gain_control=agc,
+                        ns_level=3,agc_gain_db=2.0,agc_max_gain_db=25.0,stream_delay_ms=40)])
+                    np.testing.assert_array_equal(out.ambient.data,before[:,0])
+                    np.testing.assert_array_equal(out.speech.data,np.full(rate//100,.125,dtype=np.float32))
+                    np.testing.assert_array_equal(f.data,before)
+                    self.assertEqual(created[0].assertions,(np.dtype('float32'),(rate//100,),True,True))
+                    metadata=out.context['processing']
+                    self.assertEqual(metadata['noise_suppression'],ns);self.assertEqual(metadata['automatic_gain_control'],agc)
+                    self.assertFalse(metadata['noise_reduction_verified']);self.assertFalse(metadata['gain_safety_verified'])
+                    missing=p.transform(frame(1,1010,rate,reference=False))
+                    self.assertIsNone(missing.speech);self.assertTrue(created[0].closed)
+                    self.assertFalse(missing.context['processing']['noise_suppression'])
+                    self.assertEqual(missing.context['processing']['configured_automatic_gain_control'],agc)
+                    p.transform(frame(2,1020,rate));self.assertEqual(len(created),2)
+                    p.reset();self.assertTrue(created[1].closed)
+                    p.transform(frame(3,1030,rate));p.close();self.assertTrue(created[2].closed)
+
+    def test_combined_runtime_missing_api_refuses_without_aec_fallback(self):
+        with patch('importlib.metadata.version',return_value='0.2.0'),patch.dict('sys.modules',{'pywebrtc_audio':SimpleNamespace(EchoCanceller=lambda:None)}):
+            with self.assertRaisesRegex(RuntimeError,'AudioProcessor'):
+                WebRTCDuplex.from_installed(noise_suppression=True,automatic_gain_control=True)
+
     def test_close_serializes_native_work(self):
         import threading
         entered,release,closed=threading.Event(),threading.Event(),threading.Event();errors=[]
@@ -145,7 +191,8 @@ class Context(unittest.IsolatedAsyncioTestCase):
         from humansense.mcp import MCPServer
         from humansense.providers.prosody import AudioProsody
         from humansense.schema import timestamp
-        p=WebRTCDuplex(lambda:SimpleNamespace(process=lambda near,far:near-far))
+        p=WebRTCDuplex(lambda:SimpleNamespace(process=lambda near,far:near-far),
+            noise_suppression=True,automatic_gain_control=True)
         ambient,speech=AudioProsody(window_ms=80),AudioProsody(window_ms=80)
         start=timestamp()-100;ambient_result=speech_result=None
         async with HumanSense(consent=True) as human:
@@ -159,6 +206,7 @@ class Context(unittest.IsolatedAsyncioTestCase):
             result=await MCPServer(human).call_tool('get_observations',{'capability_id':p.spec.id})
             processing=result['items'][0]['observation']['value']['processing']
             self.assertEqual(processing['input_rms'],.5);self.assertEqual(processing['speech_rms'],.25)
+            self.assertTrue(processing['noise_suppression']);self.assertTrue(processing['automatic_gain_control'])
             self.assertNotIn('data',processing);self.assertFalse(processing['recognition_improvement_verified'])
             p.close();ambient.close();speech.close()
 

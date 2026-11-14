@@ -12,7 +12,7 @@ from .process_provider import ProcessProvider
 from .providers.smolvlm_native import configuration, prompt_text
 from .schema import timestamp
 from .streams import _finish
-from .recording_scope import (resolve_evaluation_observer, validate_evaluation_backend,
+from .recording_scope import (resolve_evaluation_observer, validate_evaluation_backend, evaluation_lineage,
                              validate_evaluation_worker_scope)
 
 
@@ -130,7 +130,7 @@ class SmolVLMCalls:
             raise ValueError('bounded unvalidated semantic result required')
         return value
 
-    async def execute(self, request_id, record, frame, *, maximum_charge, ttl_ms=1000, dispatch_deadline_ns=None, evaluation_scope=None):
+    async def execute(self, request_id, record, frame, *, maximum_charge, ttl_ms=1000, dispatch_deadline_ns=None, evaluation_scope=None,evaluation_relationship='root',evaluation_predecessor=None):
         """Execute exactly one pending small_vlm request, then publish if still valid.
 
         Callers supply the original registered record/pixels and a verified budget
@@ -145,15 +145,16 @@ class SmolVLMCalls:
             raise ValueError('bounded absolute host monotonic dispatch deadline required')
         observer=resolve_evaluation_observer(self._evaluation_observer,evaluation_scope)
         worker=self.worker;validate_evaluation_backend(observer,worker)
+        lineage=evaluation_lineage(observer,evaluation_relationship,evaluation_predecessor)
         copied,evidence,pixels_sha=self._capture(request_id,record,frame)
-        task=asyncio.create_task(self._execute(request_id,copied,evidence,pixels_sha,maximum_charge,ttl_ms,dispatch_deadline_ns,observer,worker))
+        task=asyncio.create_task(self._execute(request_id,copied,evidence,pixels_sha,maximum_charge,ttl_ms,dispatch_deadline_ns,observer,worker,lineage))
         self._active=task
         try:
             return await task
         finally:
             if self._active is task:self._active=None
 
-    async def _execute(self,request_id,copied,evidence,pixels_sha,maximum_charge,ttl_ms,dispatch_deadline_ns,observer,worker):
+    async def _execute(self,request_id,copied,evidence,pixels_sha,maximum_charge,ttl_ms,dispatch_deadline_ns,observer,worker,lineage):
         dispatched=False;completed=False
         ticket=None;outcome="unadmitted"
         try:
@@ -164,7 +165,7 @@ class SmolVLMCalls:
             if observer is not None:
                 ticket=observer.reserve_call(self.controller,request_id,provider=worker.spec.provider,
                     model_revision=worker.spec.version,
-                    prompt_sha256=hashlib.sha256(prompt_text([copied.timestamp_ms]).encode()).hexdigest())
+                    prompt_sha256=hashlib.sha256(prompt_text([copied.timestamp_ms]).encode()).hexdigest(),**lineage)
             reserved=self.controller.reserve(request_id,provider=worker.spec.provider,
                 model_revision=worker.spec.version,
                 prompt_sha256=hashlib.sha256(prompt_text([copied.timestamp_ms]).encode()).hexdigest(),

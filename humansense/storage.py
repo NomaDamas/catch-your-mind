@@ -145,8 +145,19 @@ class Store:
         rows = self.connection.execute(f"SELECT payload FROM records WHERE id IN ({slots})", list(ids)).fetchall()
         return [json.loads(row[0]) for row in rows]
 
-    def latest_signals(self, subject, start, end):
+    @staticmethod
+    def _context_exclusion(exclusion):
+        # Only HumanSense's SDK-issued view supplies this private query seam.
+        # COALESCE preserves legacy records without registered capability fields.
+        if exclusion is None:
+            return '', ()
+        return (" AND COALESCE((json_extract(payload,'$.observation.capability.id')=?"
+                " AND json_extract(payload,'$.models[0].id')=?"
+                " AND json_extract(payload,'$.models[0].version')=?),0)=0", tuple(exclusion))
+
+    def latest_signals(self, subject, start, end, *, _exclude_capability=None):
         """Latest legacy name or registered capability/source/sensor identity."""
+        clause, args = self._context_exclusion(_exclude_capability)
         rows = self.connection.execute("""
             SELECT payload FROM (
               SELECT payload, ROW_NUMBER() OVER (
@@ -156,19 +167,19 @@ class Store:
                   json_extract(payload, '$.observation.sensor.sensor_id')
                 ORDER BY ts DESC, rowid DESC) AS rank
               FROM records WHERE subject=? AND kind='observation.signal' AND ts>=? AND ts<=?
-            ) WHERE rank=1
-            """, (subject, start, end)).fetchall()
+            """ + clause + ") WHERE rank=1", (subject, start, end, *args)).fetchall()
         return [json.loads(row[0]) for row in rows]
 
-    def event_summary(self, subject, start, end, *, per_kind=8):
+    def event_summary(self, subject, start, end, *, per_kind=8, _exclude_capability=None):
+        clause, args = self._context_exclusion(_exclude_capability)
         counts = dict(self.connection.execute("""SELECT json_extract(payload,'$.event'), COUNT(*)
             FROM records WHERE subject=? AND kind='observation.event' AND ts>=? AND ts<=?
-            GROUP BY json_extract(payload,'$.event')""", (subject, start, end)).fetchall())
+            """ + clause + " GROUP BY json_extract(payload,'$.event')", (subject, start, end, *args)).fetchall())
         rows = self.connection.execute("""SELECT payload FROM (
             SELECT payload, ts, rowid AS ordering, ROW_NUMBER() OVER (
               PARTITION BY json_extract(payload,'$.event') ORDER BY ts DESC,rowid DESC) AS rank
             FROM records WHERE subject=? AND kind='observation.event' AND ts>=? AND ts<=?
-            ) WHERE rank<=? ORDER BY ts,ordering""", (subject, start, end, per_kind)).fetchall()
+            """ + clause + ") WHERE rank<=? ORDER BY ts,ordering", (subject, start, end, *args, per_kind)).fetchall()
         return counts, [json.loads(row[0]) for row in rows]
 
     def repeated_text(self, subject, start, end, normalized, *, limit=16):
@@ -181,11 +192,13 @@ class Store:
         rows = self.connection.execute("SELECT id FROM records WHERE "+condition+" ORDER BY ts DESC,rowid DESC LIMIT ?", (*args, limit)).fetchall()
         return count, [row[0] for row in reversed(rows)]
 
-    def count(self, subject, start, end):
-        return self.connection.execute("SELECT COUNT(*) FROM records WHERE subject=? AND ts>=? AND ts<=?", (subject, start, end)).fetchone()[0]
+    def count(self, subject, start, end, *, _exclude_capability=None):
+        clause, args = self._context_exclusion(_exclude_capability)
+        return self.connection.execute("SELECT COUNT(*) FROM records WHERE subject=? AND ts>=? AND ts<=?" + clause, (subject, start, end, *args)).fetchone()[0]
 
-    def numeric_summary(self, subject, start, end):
+    def numeric_summary(self, subject, start, end, *, _exclude_capability=None):
         """Aggregate retained values in SQLite without decoding all stored JSON."""
+        clause, args = self._context_exclusion(_exclude_capability)
         rows = self.connection.execute("""
           SELECT json_extract(payload, '$.observation.name') AS metric,
             json_extract(payload, '$.observation.modality') AS modality,
@@ -201,9 +214,10 @@ class Store:
             AND json_extract(payload, '$.quality.status')='sufficient'
             AND json_extract(payload, '$.observation.name')!='statement.claim'
             AND json_extract(payload, '$.observation.name') NOT LIKE '%model_score'
+        """ + clause + """
           GROUP BY metric, modality, model_id, model_version
           HAVING SUM(CASE WHEN ts>=? THEN 1 ELSE 0 END)>0
-        """, (start, start, start, start, start, start, subject, end, start)).fetchall()
+        """, (start, start, start, start, start, start, subject, end, *args, start)).fetchall()
         return rows
 
     def prune(self, now_ms):

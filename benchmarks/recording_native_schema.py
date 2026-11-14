@@ -172,6 +172,13 @@ def validate_collection(collection, plan):
 
 
 def validate_recording_scope_protocol(declarations):
+    """Legacy Q1/I2 entrypoint deliberately rejects runtime profiles2."""
+    return _validate_scope_protocol_common(declarations)
+
+
+def _validate_scope_protocol_common(declarations, *, runtime_profiles=False, runtime_numeric=False):
+    # Only the separately validated built-in runtime entrypoint selects the new
+    # profile grammar. No public validator callback or acceptance switch exists.
     d=snapshot(declarations)
     required={'plan','collection','scope_protocol','instrumentation_protocol','source_manifest','tasks','profiles'}
     optional={'runtime_policy','stream_protocol','allocation_protocol','cost_card'}
@@ -181,11 +188,15 @@ def validate_recording_scope_protocol(declarations):
     keys(q,('schema_version','kind','collection_sha256','comparison_plan_sha256','stream_protocol_sha256',
         'allocation_protocol_sha256','recording_reconciliation_sha256','cost_card_sha256',
         'retention_policy','retain_financial_documents','scopes'))
-    if type(q['schema_version']) is not int or q['schema_version']!=1 or q['kind']!='recording_scope_protocol':
+    if type(q['schema_version']) is not int or q['schema_version']!=(2 if runtime_numeric else 1) or q['kind']!='recording_scope_protocol':
         raise ValueError('recording scope protocol1 required')
     if q['collection_sha256']!=digest(c) or q['comparison_plan_sha256']!=digest(plan):
         raise ValueError('original declaration binding mismatch')
-    if q['recording_reconciliation_sha256'] is not None:
+    if runtime_numeric:
+        sha(q['recording_reconciliation_sha256']);sha(q['stream_protocol_sha256'])
+        if q['allocation_protocol_sha256'] is not None:
+            raise ValueError('prospective allocation adapter is not implemented')
+    elif q['recording_reconciliation_sha256'] is not None:
         raise ValueError('recording numeric reconciliation is unsupported')
     if q['retention_policy']!='explicit_external_evaluation_hashes' or type(q['retain_financial_documents']) is not bool:
         raise ValueError('explicit recording retention policy required')
@@ -207,7 +218,7 @@ def validate_recording_scope_protocol(declarations):
         integer(scope['scope_index'],0,64)
     if q['scopes']!=expected: raise ValueError('exact immutable original scope inventory required')
     keys(i,('schema_version','kind','scope_protocol_sha256','collection_sha256','hello_timeout_ms','close_timeout_ms','fd_environment_key'))
-    if type(i['schema_version']) is not int or i['schema_version']!=2 or i['kind']!='recording_instrumentation':
+    if type(i['schema_version']) is not int or i['schema_version']!=(3 if runtime_numeric else 2) or i['kind']!='recording_instrumentation':
         raise ValueError('recording instrumentation2 required')
     if i['scope_protocol_sha256']!=digest(q) or i['collection_sha256']!=digest(c):
         raise ValueError('instrumentation differs from original scopes')
@@ -215,7 +226,17 @@ def validate_recording_scope_protocol(declarations):
     if i['fd_environment_key']!='GAMST_RECORDING_FD_V2': raise ValueError('recording channel2 FD required')
     source=validate_manifest(d['source_manifest']); original_tasks=validate_tasks(d['tasks'],source['duration_ns'])
     sequence(source['sources'],16,1)
-    validate_frozen_profiles(source,d['profiles'])
+    if runtime_profiles:
+        from .recording_runtime_contract import validate_profiles_v2
+        if 'runtime_policy' not in d:raise ValueError('runtime profiles require bound U declaration')
+        policies={}
+        for arm in d['runtime_policy']['arms']:
+            matches=[p for p in arm['recording_policies'] if p['recording_id']==source['recording_id']]
+            if len(matches)!=1:raise ValueError('one original runtime recording policy required')
+            policies[arm['arm']]=matches[0]
+        validate_profiles_v2(d['profiles'],source,policies)
+    else:
+        validate_frozen_profiles(source,d['profiles'])
     matches=[r for r in c['recordings'] if r['recording_id']==source['recording_id']]
     if len(matches)!=1: raise ValueError('source must belong to frozen recording')
     recording=matches[0]
@@ -266,10 +287,14 @@ def preflight_recording_collection(recording_declarations):
     declarations count once toward declaration bytes, but their emitted copies
     count once per invocation in the artifact prediction.
     """
+    return _preflight_collection_common([validate_recording_scope_protocol(v) for v in sequence(recording_declarations,32,1)])
+
+
+def _preflight_collection_common(recording_declarations):
     sequence(recording_declarations,32,1)
     collection=None;seen=set();unique={};source_bytes=0;metadata_bytes=0
     for value in recording_declarations:
-        d=validate_recording_scope_protocol(value);c=d['collection']
+        d=value;c=d['collection']
         if collection is None:collection=c;identity=(digest(c),digest(d['scope_protocol']),digest(d['instrumentation_protocol']))
         if identity!=(digest(c),digest(d['scope_protocol']),digest(d['instrumentation_protocol'])):
             raise ValueError('one frozen collection preflight required')

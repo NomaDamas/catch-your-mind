@@ -59,6 +59,7 @@ class CallController:
         self._runtime_guard = self._runtime_clock = self._record_guard = self._runtime_epoch = None
         self._detached = {}
         self._denials = {}
+        self._recording_settlement_recorder = None
 
     def bind_runtime(self, *, guard, clock, validate_record, epoch):
         """One-way binding of a fresh instance to an application-owned runtime."""
@@ -310,12 +311,19 @@ class CallController:
                 self._retire(r, 'completed')
             return result
 
-    def settle(self, token, *, components, now_ms):
+    def settle(self, token, *, components, now_ms, recording_receipt=None):
         with self._lock:
             now = self._time(now_ms)
+            recorder = self._recording_settlement_recorder
+            if recording_receipt is not None:
+                if recorder is None:
+                    raise ValueError('recording receipt has no controller owner')
+                recorder._prepare(self, token, recording_receipt, components)
             if type(token) is str and token in self._detached:
                 result = self._budget.settle(self._detached[token], components=components, now_ms=now)
                 if result['state'] == 'settled':
+                    if recording_receipt is not None:
+                        recorder._record(token, recording_receipt, result)
                     del self._detached[token]
                 return result
             r = self._request(token)
@@ -323,6 +331,8 @@ class CallController:
                 raise ValueError('single dispatched financial settlement required')
             result = self._budget.settle(r['reservation']['token'], components=components, now_ms=now)
             if result['state'] == 'settled':
+                if recording_receipt is not None:
+                    recorder._record(token, recording_receipt, result)
                 r['charged'] = True
                 if r['finished']:
                     self._retire(r, 'completed')

@@ -68,6 +68,7 @@ class HumanSense:
         self._last_ts = {}
         self._generation = 0
         self._session_id = uuid.uuid4().hex
+        self._evaluation_snapshot_publishers = {}
         self._metric_directions = {}
         self.dropped_records = 0
         self.plugin_errors = []
@@ -95,6 +96,12 @@ class HumanSense:
         for observer in self._evaluation_observers:
             try:observer.invalidate(reason, subject_id=subject_id)
             except BaseException:pass
+
+    def _retire_evaluation_snapshot_publishers(self):
+        publishers = getattr(self, '_evaluation_snapshot_publishers', {})
+        for publisher in publishers.values():
+            publisher._retire()
+        publishers.clear()
 
     def enable_separation_media(self, *, subject_id='local-user', source_id, sensor_id,
                                 ttl_ms=30000, capacity=8, max_bytes=16*1024*1024,
@@ -131,6 +138,7 @@ class HumanSense:
         prior = getattr(self, '_consent', False)
         self._consent = value
         if prior and not value:
+            self._retire_evaluation_snapshot_publishers()
             self._invalidate_evaluation("consent_revoked")
             self._generation += 1
             self._invalidate_call_drivers('consent_revoked')
@@ -290,6 +298,15 @@ class HumanSense:
         record = self._record("observation.signal", subject_id, ts,
             observation=observation,
             models=[{"id": model_id, "version": model_version, "backend": "plugin"}], quality=quality)
+        # The SDK-owned task wrapper is detached evidence about a frozen Context,
+        # not another sensory measurement. Running inference here would create
+        # derived wrapper records that contaminate subsequent source counts.
+        publisher = self._evaluation_snapshot_publishers.get(subject_id)
+        if (publisher is not None and capability_id == publisher._spec.id
+                and spec == publisher._spec):
+            from .capabilities import bounded_json
+            bounded_json(record, max_bytes=131072)
+            return self._emit(record)
         self._emit(record)
         if name == "speech.activity" and isinstance(value, bool) and record["quality"]["status"] == "sufficient":
             activity = [r for r in self.store.query(subject_id, end=ts, kind="observation.signal", name=name)
@@ -860,11 +877,18 @@ class HumanSense:
             models[(model["id"], model["version"])] = model
         return list(models.values())
 
-    async def get_trends(self, subject_id="local-user", window="1h", end_ms=None):
+    def create_evaluation_snapshot_publisher(self, subject_id='local-user', *, implementation_sha256):
+        """Issue a bounded task-evidence publisher and its opt-in source view."""
+        from .evaluation_snapshot import create_snapshot_publisher
+        return create_snapshot_publisher(self, subject_id, implementation_sha256)
+
+    async def get_trends(self, subject_id="local-user", window="1h", end_ms=None, *, context_view=None):
+        from .evaluation_snapshot import context_exclusion
+        exclusion = context_exclusion(self, subject_id, context_view)
         self._prune()
         end = timestamp(end_ms)
         duration = _window_ms(window)
-        rows = self.store.numeric_summary(subject_id, end-duration, end)
+        rows = self.store.numeric_summary(subject_id, end-duration, end, _exclude_capability=exclusion)
         metrics = {}
         names = Counter(row[0] for row in rows)
         for name, modality, model_id, model_version, count, mean, prior_count, prior_mean, prior_min, prior_max in rows:
@@ -878,13 +902,15 @@ class HumanSense:
         return {"status": "available" if metrics else "insufficient", "metrics": metrics,
                 "window_ms": duration, "interpretation": "observed_patterns_only"}
 
-    async def get_context(self, subject_id="local-user", window="1h", include=None):
+    async def get_context(self, subject_id="local-user", window="1h", include=None, *, context_view=None):
+        from .evaluation_snapshot import context_exclusion
+        exclusion = context_exclusion(self, subject_id, context_view)
         self._prune()
         now = timestamp()
         start = now-_window_ms(window)
-        counts, events = self.store.event_summary(subject_id, start, now, per_kind=8)
+        counts, events = self.store.event_summary(subject_id, start, now, per_kind=8, _exclude_capability=exclusion)
         total_events = sum(counts.values())
-        records = [r for r in self.store.latest_signals(subject_id, start, now)+events
+        records = [r for r in self.store.latest_signals(subject_id, start, now, _exclude_capability=exclusion)+events
                    if r.get("observation", {}).get("name") != TRANSCRIPT_OUTPUT]
         result = envelope("observation.context", subject_id, now, window_ms=_window_ms(window),
             evidence=[{"record_id": r["id"]} for r in events])
@@ -896,9 +922,12 @@ class HumanSense:
                        "summary": {"event_counts": counts, "event_count": total_events,
                                    "evidence_count": len(events), "max_evidence_per_event_type": 8,
                                    "evidence_truncated": total_events > len(events),
-                                   "record_count": self.store.count(subject_id, start, now), "method": "deterministic_aggregate"},
-                       "trends": await self.get_trends(subject_id, window),
+                                   "record_count": self.store.count(subject_id, start, now, _exclude_capability=exclusion), "method": "deterministic_aggregate"},
+                       "trends": await self.get_trends(subject_id, window, context_view=context_view),
                        "include": include or ["speech", "movement", "interaction"]})
+        if context_view is not None:
+            result['context_policy'].update(view=context_view.name,
+                excluded_capability_sha256=context_view._publisher.capability_sha256)
         return result
 
     async def summarize(self, **kwargs):
@@ -935,6 +964,7 @@ class HumanSense:
                 "records": await self.get_history(subject_id, start_ms=start_ms, end_ms=end_ms, limit=100_000)}
 
     async def pause(self):
+        self._retire_evaluation_snapshot_publishers()
         self._invalidate_evaluation("pause")
         self.paused = True
         self._analysis_results.clear()
@@ -953,6 +983,9 @@ class HumanSense:
         return {"paused": False}
 
     async def delete_data(self, subject_id=None):
+        # Deletion resets the global processing generation, so every issued
+        # publisher is retired before any owned asynchronous cleanup can run.
+        self._retire_evaluation_snapshot_publishers()
         self._invalidate_evaluation("delete", subject_id)
         from .streams import _finish
         self._invalidate_call_drivers('delete',reject_self_join=True)
@@ -1047,6 +1080,7 @@ class HumanSense:
 
     async def reset_processing(self):
         """Discard pending media results and model buffers without pausing text."""
+        self._retire_evaluation_snapshot_publishers()
         self._invalidate_evaluation("reset")
         self._generation += 1
         self._invalidate_call_drivers('reset',reject_self_join=True)
@@ -1057,6 +1091,7 @@ class HumanSense:
     async def close(self):
         from .streams import _finish
         self._invalidate_call_drivers('close',reject_self_join=True)
+        self._retire_evaluation_snapshot_publishers()
         task = getattr(self, '_close_task', None)
         if task is None:
             self._invalidate_evaluation("close")

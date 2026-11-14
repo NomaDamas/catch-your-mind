@@ -32,6 +32,11 @@ Streaming modes must distinguish native stateful, rolling window, independent fr
 
 ## Candidate inventory and integration expectations
 
+Current per-candidate implementation, runtime, license and command status is in
+the [candidate execution matrix](candidate-execution-matrix.md). The dated user
+direction at the end of this plan separates the current software phase from
+later actual experiments; the original product acceptance requirements remain.
+
 Candidates are alternatives and research extension targets, not a requirement to run all models simultaneously. Each inventory row must ultimately map to executable provider coverage or an explicitly open limitation issue. A generic callable or a catalog entry alone is not a validated model integration. The delivery floor is executable, validated coverage for every capability named below, including experimental sensor capabilities; an extension contract alone does not meet it. Alternative models may share adapters, but every named candidate retains its own execution/compatibility status. Open required-capability limitations prevent overall completion; they are not approved deferrals. Only Halo demonstrations are deferred.
 
 ### Vision
@@ -96,3 +101,17 @@ Keep implementation, mocked contract tests, actual model execution, and physical
 ## User-directed installation deferral (2026-11-14)
 
 The user requested that model installation happen later and Hugging Face model caches be cleared while development continues. Do not download/install additional model weights during this phase. Continue provider code, runtime contracts, API/MCP integration and deterministic tests. Keep actual inference/device acceptance explicitly pending; synthetic tests do not satisfy it, and the original full capability and VLM cost/quality requirements remain unchanged. This changes installation timing, not the completion standard. Cache cleanup must preserve authentication data, unrelated project assets and protected Codex session data.
+
+## User-directed software continuation (2026-11-15)
+
+The user explicitly resumed the approved goal and requested completion of all
+remaining software work, while leaving actual experiments and model/sensor
+validation for later. Finish implementation, integration, deterministic checks,
+independent review, CI and merges in this phase. Report software completion
+separately from full product acceptance; do not require the deferred experiments
+to finish the current software phase, and do not label their gates passed.
+The original 24-family scope and measured quality/cost/latency requirements above
+remain the acceptance criteria for that later phase. Unavailable upstream research
+runtimes and unresolved candidate identities stay explicit linked prerequisites;
+an alternative's name is not a supported integration. No model installation,
+hardware purchase or cleanup is authorized by this continuation instruction.

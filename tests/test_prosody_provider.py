@@ -30,6 +30,40 @@ class Prosody(unittest.TestCase):
             self.assertAlmostEqual(features['rms'], .2/math.sqrt(2), delta=.005)
             self.assertGreater(features['periodicity_score'], .95)
 
+    def test_bounded_spectral_and_cycle_features_with_explicit_abstention(self):
+        import json
+        tone=self.tone(200,duration_ms=250)
+        features=AudioProsody(window_ms=250).process(self.frame(tone))['features']
+        spectral=features['spectral'];cycles=features['cycles']
+        self.assertEqual(spectral['frame_count'],23)
+        self.assertEqual(len(spectral['mfcc_mean']),13)
+        self.assertEqual(len(spectral['mel_power_mean']),40)
+        self.assertTrue(all(math.isfinite(v) for v in spectral['mfcc_mean']))
+        self.assertTrue(cycles['eligible'])
+        self.assertLess(cycles['jitter_local'],.0001)
+        self.assertLess(cycles['shimmer_local'],.0001)
+        self.assertGreater(cycles['hnr_db'],40)
+        self.assertLess(len(json.dumps(features)),8192)
+        for signal,reason in ((np.zeros(4000),'not_periodic'),(np.ones(4000),'clipped'),
+                (np.random.default_rng(3).normal(0,.1,4000),'not_periodic')):
+            output=AudioProsody(window_ms=250).process(self.frame(signal))['features']
+            self.assertFalse(output['cycles']['eligible'])
+            self.assertEqual(output['cycles']['reason'],reason)
+            self.assertIsNone(output['cycles']['jitter_local'])
+        short=AudioProsody().process(self.frame(self.tone(60)))['features']['cycles']
+        self.assertFalse(short['eligible']);self.assertEqual(short['reason'],'insufficient_cycles')
+
+    def test_amplitude_modulation_changes_shimmer_and_spectral_gain_convention(self):
+        samples=self.tone(200,duration_ms=250)
+        t=np.arange(len(samples))/16000
+        baseline=AudioProsody(window_ms=250).process(self.frame(samples))['features']
+        modulated=AudioProsody(window_ms=250).process(self.frame(samples*(1+.2*np.sin(2*np.pi*8*t))))['features']
+        self.assertTrue(modulated['cycles']['eligible'])
+        self.assertGreater(modulated['cycles']['shimmer_local'],baseline['cycles']['shimmer_local']+.01)
+        louder=AudioProsody(window_ms=250).process(self.frame(samples*2))['features']
+        self.assertGreater(louder['spectral']['mfcc_mean'][0],baseline['spectral']['mfcc_mean'][0])
+        self.assertAlmostEqual(louder['dbfs']-baseline['dbfs'],20*math.log10(2),places=6)
+
     def test_silence_dc_noise_and_clipping_semantics(self):
         for samples in (np.zeros(1280), np.full(1280, .5), np.random.default_rng(9).normal(0, .1, 1280)):
             features = AudioProsody().process(self.frame(samples))['features']
@@ -123,3 +157,4 @@ class ProsodyRuntime(unittest.IsolatedAsyncioTestCase):
             self.assertAlmostEqual(observation['value']['features']['pitch_hz'], 220, delta=1)
             self.assertEqual(observation['capability']['window_ms'], 80)
             self.assertEqual(observation['interpretation'], 'estimate')
+            self.assertEqual(len(observation['value']['features']['spectral']['mfcc_mean']),13)

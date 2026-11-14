@@ -1,4 +1,4 @@
-"""Ten-millisecond WebRTC AEC3 with separate unchanged ambient PCM."""
+"""Ten-millisecond WebRTC AEC3/NS/AGC with separate unchanged ambient PCM."""
 from dataclasses import dataclass, replace
 import math
 import threading
@@ -15,23 +15,38 @@ class DuplexBlock:
 
 class WebRTCDuplex:
     def __init__(self,factory,*,sample_rate=16000,stream_delay_ms=0,
-                 ambient_sensor_id='ambient',speech_sensor_id='speech'):
+                 ambient_sensor_id='ambient',speech_sensor_id='speech',
+                 noise_suppression=False,automatic_gain_control=False,ns_level=1,
+                 agc_gain_db=0.0,agc_max_gain_db=50.0):
         self.spec=self.capability(sample_rate=sample_rate,stream_delay_ms=stream_delay_ms,
-            ambient_sensor_id=ambient_sensor_id,speech_sensor_id=speech_sensor_id)
+            ambient_sensor_id=ambient_sensor_id,speech_sensor_id=speech_sensor_id,
+            noise_suppression=noise_suppression,automatic_gain_control=automatic_gain_control,
+            ns_level=ns_level,agc_gain_db=agc_gain_db,agc_max_gain_db=agc_max_gain_db)
         if not callable(factory):raise ValueError('explicit fresh AEC factory required')
         self.factory=factory;self.rate=sample_rate;self.delay=stream_delay_ms
         self.ambient_sensor_id=ambient_sensor_id;self.speech_sensor_id=speech_sensor_id
+        self.noise_suppression=noise_suppression;self.automatic_gain_control=automatic_gain_control
+        self.ns_level=ns_level;self.agc_gain_db=float(agc_gain_db);self.agc_max_gain_db=float(agc_max_gain_db)
         self._lock=threading.RLock();self.closed=False;self.backend=None;self.resets=0
         self.owner=self.last=self.expected_end=None
 
     @staticmethod
-    def capability(*,sample_rate=16000,stream_delay_ms=0,ambient_sensor_id='ambient',speech_sensor_id='speech'):
+    def capability(*,sample_rate=16000,stream_delay_ms=0,ambient_sensor_id='ambient',speech_sensor_id='speech',
+                   noise_suppression=False,automatic_gain_control=False,ns_level=1,
+                   agc_gain_db=0.0,agc_max_gain_db=50.0):
         if type(sample_rate) is not int or sample_rate not in (16000,32000,48000):raise ValueError('AEC sample_rate must be16000/32000/48000')
         if type(stream_delay_ms) is not int or not 0<=stream_delay_ms<=500:raise ValueError('configured delay must be0..500ms')
         identifier(ambient_sensor_id);identifier(speech_sensor_id)
         if ambient_sensor_id==speech_sensor_id:raise ValueError('ambient and speech sensor IDs must differ')
+        if type(noise_suppression) is not bool or type(automatic_gain_control) is not bool:
+            raise ValueError('NS and AGC selection must be explicit booleans')
+        if type(ns_level) is not int or not 0<=ns_level<=3:raise ValueError('NS level must be0..3')
+        for name,value,low,high in (('agc_gain_db',agc_gain_db,0,20),('agc_max_gain_db',agc_max_gain_db,15,50)):
+            if type(value) not in (int,float) or not low<=value<=high or not math.isfinite(value):
+                raise ValueError(f'{name} must be finite within{low}..{high}dB')
         import hashlib
-        version='v1.'+hashlib.sha256(f'{sample_rate}:{stream_delay_ms}:{ambient_sensor_id}:{speech_sensor_id}'.encode()).hexdigest()
+        settings=f'{sample_rate}:{stream_delay_ms}:{ambient_sensor_id}:{speech_sensor_id}:{noise_suppression}:{automatic_gain_control}:{ns_level}:{float(agc_gain_db)}:{float(agc_max_gain_db)}'
+        version='v2.'+hashlib.sha256(settings.encode()).hexdigest()
         return CapabilitySpec('audio.webrtc.aec3','audio.duplex','audio','pywebrtc_audio.0.2.0',version,
             (OutputField('processing','object'),),'native',window_ms=10,stateful=True,reset_on_gap=True,
             freshness_ms=1000,interpretation='estimate',devices=('cpu',),
@@ -44,11 +59,23 @@ class WebRTCDuplex:
         try:
             import importlib.metadata
             if importlib.metadata.version('pywebrtc-audio')!='0.2.0':raise RuntimeError('select pywebrtc-audio==0.2.0 in the AEC runtime')
-            from pywebrtc_audio import EchoCanceller
+            import pywebrtc_audio
         except (ImportError,importlib.metadata.PackageNotFoundError) as exc:
             raise RuntimeError('install humansense-sdk[duplex] in an explicitly selected runtime') from exc
-        return cls(lambda:EchoCanceller(sample_rate=options.get('sample_rate',16000),num_channels=1,
-                    stream_delay_ms=options.get('stream_delay_ms',0)),**options)
+        if options.get('noise_suppression',False) or options.get('automatic_gain_control',False):
+            constructor=getattr(pywebrtc_audio,'AudioProcessor',None)
+            if not callable(constructor):raise RuntimeError('selected pywebrtc-audio runtime lacks native AudioProcessor NS/AGC API')
+            def factory():
+                return constructor(sample_rate=options.get('sample_rate',16000),num_channels=1,
+                    echo_cancellation=True,noise_suppression=options.get('noise_suppression',False),
+                    high_pass_filter=True,auto_gain_control=options.get('automatic_gain_control',False),
+                    ns_level=options.get('ns_level',1),agc_gain_db=float(options.get('agc_gain_db',0.0)),
+                    agc_max_gain_db=float(options.get('agc_max_gain_db',50.0)),stream_delay_ms=options.get('stream_delay_ms',0))
+        else:
+            constructor=getattr(pywebrtc_audio,'EchoCanceller',None)
+            if not callable(constructor):raise RuntimeError('selected pywebrtc-audio runtime lacks native EchoCanceller API')
+            def factory():return constructor(sample_rate=options.get('sample_rate',16000),num_channels=1,stream_delay_ms=options.get('stream_delay_ms',0))
+        return cls(factory,**options)
 
     def _reset(self):
         backend,self.backend=self.backend,None
@@ -136,7 +163,12 @@ class WebRTCDuplex:
                     speech_rms=out_rms,speech_peak_before_clip=out_peak,output_samples_clipped=clipped,
                     input_clipping_present=bool(np.any((data[:,0]==-32768)|(data[:,0]==32767))) if data.dtype==np.int16
                         else bool(np.any(np.abs(values[:,0])>=1)),ambient_preserved=True,
-                    high_pass_filter_applied=present,noise_suppression=False,automatic_gain_control=False,
+                    high_pass_filter_applied=present,noise_suppression=present and self.noise_suppression,
+                    automatic_gain_control=present and self.automatic_gain_control,
+                    configured_noise_suppression=self.noise_suppression,configured_automatic_gain_control=self.automatic_gain_control,
+                    configured_ns_level=self.ns_level,configured_agc_gain_db=self.agc_gain_db,
+                    configured_agc_max_gain_db=self.agc_max_gain_db,
+                    noise_reduction_verified=False,gain_safety_verified=False,
                     continuity_resets=self.resets,echo_reduction_verified=False,recognition_improvement_verified=False)
                 return DuplexBlock(ambient,speech,self.spec.validate(dict(processing=processing)))
             except Exception:

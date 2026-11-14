@@ -1,5 +1,9 @@
 # Hand geometry context
 
+For trained task-label candidates, use the separate
+[GestureRecognizer VIDEO profile](gesture-context.md). This geometry provider
+does not itself classify gestures.
+
 `MediaPipeHandContext` supplies bounded `vision.hand_geometry` observations to
 SensorStreams and Python/MCP context consumers. The `mediapipe.hand` ProcessProvider
 profile runs an explicitly chosen local Hand Landmarker task in CPU IMAGE mode.

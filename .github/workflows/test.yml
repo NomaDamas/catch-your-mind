@@ -57,7 +57,9 @@ jobs:
       - run: python -m unittest discover -s tests -p 'test_qwen*.py' -v
       - run: python -m unittest discover -s tests -p test_body_context.py -v
       - run: python -m unittest discover -s tests -p test_hand_context.py -v
+      - run: python -m unittest discover -s tests -p test_gesture_context.py -v
       - run: python -m unittest discover -s tests -p test_face_context.py -v
+      - run: python -m unittest discover -s tests -p test_head_orientation.py -v
       - run: python -m unittest discover -s tests -p test_gaze.py -v
       - run: python -m unittest discover -s tests -p test_depth.py -v
       - run: python -m unittest discover -s tests -p test_ocr.py -v
@@ -70,6 +72,9 @@ jobs:
       - run: python -m unittest discover -s tests -p 'test_compensated*.py' -v
       - run: python -m unittest discover -s tests -p 'test_stereo*.py' -v
       - run: python -m unittest discover -s tests -p test_image_events.py -v
+      - run: python -m unittest discover -s tests -p test_tennis_image.py -v
+      - run: python -m unittest discover -s tests -p test_anchor_events.py -v
+      - run: python -m unittest discover -s tests -p test_ground_plane.py -v
       - run: python -m unittest discover -s tests -p test_process_provider.py -v
       - run: python -m unittest discover -s tests -p test_separation_media.py -v
       - run: python -m unittest discover -s tests -p test_sam_audio_context.py -v
@@ -98,3 +103,4 @@ jobs:
       - run: python -m unittest discover -s tests -p test_visual_context_call.py -v
       - run: python -m unittest discover -s tests -p 'test_openai_responses*.py' -v
       - run: python -m unittest discover -s tests -p test_controller_attempts.py -v
+      - run: PYTHONPATH=tests:. python -m unittest test_recording_financial test_recording_financial_bounds test_recording_settlement test_recording_financial_native test_recording_lifetime_ledger test_recording_full_lifetime test_recording_fixture_receipts test_recording_exposure_report test_matched_source_exposure test_recording_numeric_finance -v

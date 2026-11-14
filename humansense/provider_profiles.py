@@ -3,6 +3,15 @@ from .capabilities import bounded_json
 
 
 def capability(profile, config):
+    if profile == 'geometry.ground_plane':
+        from .providers.ground_plane import GroundPlane
+        return GroundPlane.capability(config)
+    if profile == 'rfdetr.tennis_image':
+        from .providers.tennis_image import TennisImageTask
+        return TennisImageTask.capability(config)
+    if profile == 'mediapipe.head_orientation.video':
+        from .providers.head_orientation import HeadOrientationContext
+        return HeadOrientationContext.capability(**config)
     if profile == 'pg.physical.local':
         from .pg_physical_process import capability as pg_capability
         return pg_capability(config)
@@ -79,7 +88,8 @@ def capability(profile, config):
         return OpenPIVFlow.capability(**config)
     if profile == 'webrtc.aec3':
         from .providers.duplex import WebRTCDuplex
-        if set(config)-{'sample_rate','stream_delay_ms','ambient_sensor_id','speech_sensor_id'}:
+        if set(config)-{'sample_rate','stream_delay_ms','ambient_sensor_id','speech_sensor_id',
+                       'noise_suppression','automatic_gain_control','ns_level','agc_gain_db','agc_max_gain_db'}:
             raise ValueError('unknown duplex profile option')
         return WebRTCDuplex.capability(**config)
     if profile == 'dinov3.regions':
@@ -115,7 +125,7 @@ def capability(profile, config):
             raise ValueError('gaze profile requires local gaze/face paths and hashes, optional arch/max_faces')
         return L2CSGaze.capability(config['sha256'],config['face_sha256'],
             arch=config.get('arch','ResNet50'),max_faces=config.get('max_faces',4))
-    if profile in ('mediapipe.body.video', 'mediapipe.hand.video', 'mediapipe.face.video'):
+    if profile in ('mediapipe.body.video', 'mediapipe.hand.video', 'mediapipe.face.video', 'mediapipe.gesture.video'):
         from .providers.landmarker_video import MediaPipeVideoContext
         if set(config)-{'path','sha256','max_entities','max_gap_ms'} or not {'path','sha256'} <= set(config) or type(config['path']) is not str:
             raise ValueError('VIDEO profile requires path, sha256 and optional max_entities/max_gap_ms')
