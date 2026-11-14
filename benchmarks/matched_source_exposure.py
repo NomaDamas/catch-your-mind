@@ -14,6 +14,7 @@ from .recording_financial import (N63, array, digest, enum, fraction, integer, k
                                   nullable, ratio, rational, sha, snapshot)
 from .stream_cost_ledger import CATEGORIES
 from .three_arm_comparison import validate_three_arm_plan
+from .perception_comparison import plan_digest
 
 EXPOSURE_LIMITS = dict(max_groups=32,max_arm_runs=96,max_original_tasks=1000,
     max_cost_lines=131072,max_cost_pages=1024,max_financial_metadata_bytes=67108864,
@@ -74,19 +75,19 @@ def validate_recording_opportunities(value,*,expected_sha256,comparison_plan_sha
 
 
 def validate_exposure_policy(value,plan,recordings,*,expected_sha256,expected_recordings_sha256):
-    plan = validate_three_arm_plan(plan,expected_plan_sha256=digest(plan))
+    plan = validate_three_arm_plan(plan,expected_plan_sha256=plan_digest(plan))
     value = _frozen(value,expected_sha256)
     keys(value,('schema_version','kind','comparison_plan_sha256','recordings_sha256',
                 'latency_policy_sha256','accounting_policy_sha256','financial_adapter_inventory_sha256',
                 'source_policy','bootstrap','targets','failure_policy','limits'),'exposure policy')
     if (type(value['schema_version']) is not int or value['schema_version'] != 2 or
-            value['kind'] != 'matched_source_exposure_full_lifetime' or value['comparison_plan_sha256'] != digest(plan) or
+            value['kind'] != 'matched_source_exposure_full_lifetime' or value['comparison_plan_sha256'] != plan_digest(plan) or
             value['recordings_sha256'] != sha(expected_recordings_sha256)):
         raise ValueError('new upstream exposure2 declaration required')
     for key in ('latency_policy_sha256','accounting_policy_sha256','financial_adapter_inventory_sha256'):
         sha(value[key])
     recordings = validate_recording_opportunities(recordings,expected_sha256=expected_recordings_sha256,
-                                                 comparison_plan_sha256=digest(plan))
+                                                 comparison_plan_sha256=plan_digest(plan))
     policy = value['source_policy']
     keys(policy,tuple(SOURCE_POLICY)+('max_acquisition_lateness_ns',),'source coverage policy')
     if any(policy[k] != v for k,v in SOURCE_POLICY.items()):

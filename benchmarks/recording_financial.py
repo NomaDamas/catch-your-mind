@@ -14,7 +14,8 @@ import re
 import stat
 
 from humansense.capabilities import identifier
-from humansense.recording_settlement import validate_synthetic_invoice
+from humansense.recording_settlement import (AUTHORITY,ADAPTER,INVOICE_FIELDS,LINE_FIELDS,
+    FINALITY_FIELDS,EVIDENCE_FIELDS,INPUT_GRAMMAR,OUTPUT_GRAMMAR,validate_synthetic_invoice)
 
 N63 = 2**63 - 1
 N256 = 2**256 - 1
@@ -23,8 +24,6 @@ SOURCE_BYTES = 1024**2
 MAX_ROWS = 131072
 MAX_PAGES = 1024
 MAX_METADATA = 64*1024**2
-AUTHORITY = 'gamst.synthetic_invoice_fixture_v1'
-ADAPTER = 'synthetic_invoice_fixture_v1'
 PAGE_KINDS = {
     'source': 'recording_financial_source_page',
     'evidence': 'recording_financial_evidence_page',
@@ -33,29 +32,6 @@ PAGE_KINDS = {
     'finality': 'recording_financial_finality_page',
     'line-locators': 'recording_cost_line_locator_page',
 }
-INVOICE_FIELDS = ('schema_version','kind','evidence_class','authority','provider','revision',
-                  'account_scope','invoice_id','currency','currency_unit','lines')
-LINE_FIELDS = ('line_id','stream_id','component_id','resource_id','lane_id','operation_key',
-               'service_start_ns','service_end_ns','service_event_ns','source_quantity',
-               'quantity','billed_atomic')
-FINALITY_FIELDS = ('schema_version','kind','evidence_class','authority','execution_sha256',
-                  'stream_id','accounting_policy_sha256','source_document_sha256',
-                  'operation_inventory_sha256','lane_closure_inventory_sha256',
-                  'service_end_ns','issued_ns','state')
-EVIDENCE_FIELDS = ('schema_version','kind','adapter_id','adapter_inventory_sha256','origin',
-                   'source_document','provider','revision','account_scope','invoice_id','line_id',
-                   'claim_sha256','owner_instance','stream_id','quantities','billed_atomic',
-                   'currency','currency_unit','service_start_ns','service_end_ns',
-                   'service_event_ns','observed_received_ns','finality_evidence_sha256')
-# Frozen grammar descriptors are data, never caller-selected JSON Schema/code.
-INPUT_GRAMMAR = dict(schema_version=1, kind='synthetic_invoice_fixture_input_grammar',
-    authority=AUTHORITY, invoice_fields=list(INVOICE_FIELDS), line_fields=list(LINE_FIELDS),
-    operation_key=['invocation_ordinal','binding_index','call_ordinal'],
-    finality_fields=list(FINALITY_FIELDS), rational='reduced_unsigned_256',
-    invoice_limit_bytes=65536, invoice_max_lines=64)
-OUTPUT_GRAMMAR = dict(schema_version=1, kind='synthetic_invoice_fixture_output_grammar',
-    evidence_fields=list(EVIDENCE_FIELDS), origin='synthetic_fixture',
-    claim_domain='gamst.recording.claim.v1', receipt_authenticity_verified=False)
 _RUN_ISSUER = object()
 RUN_VIOLATIONS = ('source_incomplete','clock_discontinuity','operational_incomplete',
     'external_work_unknown','reservation_overrun','missing_native_prefix','unsupported_entry_coverage')
@@ -90,6 +66,7 @@ class FinancialRunView:
     operational_closed: bool
     external_work_closed: bool
     worker_inventory_sha256: str
+    native_terminal_sha256: object
     semantic_unknown_instances: tuple
     violations: tuple
 
@@ -100,6 +77,7 @@ class FinancialRunView:
         for name in ('execution_sha256','run_inventory_sha256','source_manifest_sha256',
                      'source_coverage_sha256','task_row_inventory_sha256','worker_inventory_sha256'):
             sha(values[name])
+        nullable(values['native_terminal_sha256'],sha)
         for name in ('stream_id','recording_id','clock_domain'): identifier(values[name])
         enum(values['arm'],'ABC'); integer(values['invocation_ordinal'],maximum=95)
         for name in ('source_comparable','clock_consistent','operational_closed','external_work_closed'):
@@ -114,6 +92,10 @@ class FinancialRunView:
         violations = tuple(values['violations'])
         if len(violations) > len(RUN_VIOLATIONS) or len(set(violations)) != len(violations): raise ValueError('finite unique run violations required')
         for item in violations: enum(item,RUN_VIOLATIONS)
+        if values['native_terminal_sha256'] is None and (
+                'missing_native_prefix' not in violations or any(values[name] for name in
+                ('source_comparable','operational_closed','external_work_closed'))):
+            raise ValueError('missing actual terminal requires an explicitly incomplete failed arm')
         values['semantic_unknown_instances'] = unknown; values['violations'] = violations
         for name,value in values.items(): object.__setattr__(self,name,value)
 
@@ -410,7 +392,9 @@ def validate_financial_evidence(value, *, adapters, invoice, source_reference):
         raise ValueError('original source quantity differs')
     if value['claim_sha256'] != claim_sha256(*(value[k] for k in ('provider','account_scope','invoice_id','line_id'))):
         raise ValueError('original logical claim identity differs')
-    nullable(value['owner_instance'],sha); nullable(value['finality_evidence_sha256'],sha)
+    nullable(value['owner_instance'],sha)
+    if value['finality_evidence_sha256'] is not None:
+        raise ValueError('initial F1 finality must join downstream without a digest cycle')
     integer(value['observed_received_ns']); integer(value['billed_atomic'])
     return value
 
@@ -423,13 +407,24 @@ class FinancialArtifacts:
     """
     def __init__(self, root, *, budget=None):
         self.root = Path(root).absolute()
-        self._fd = os.open(self.root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        if len(str(self.root)) > 4096 or len(self.root.parts) > 128:
+            raise ValueError('bounded owned financial root path required')
+        self._fd = os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_NONBLOCK)
+        try:
+            for part in self.root.parts[1:]:
+                if part in ('.','..'): raise ValueError('no root path traversal')
+                child = os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=self._fd)
+                os.close(self._fd); self._fd = child
+        except BaseException:
+            os.close(self._fd)
+            raise
         self._identity = os.fstat(self._fd)
         self._budget = budget
         self._closed = False
         self._metadata = self._source = self._pages = self._rows = 0
         self._files = set()
         self._section_files = {}
+        self._read_files = {}; self._read_source = self._read_metadata = self._read_total = 0
 
     def close(self):
         if not self._closed:
@@ -455,7 +450,7 @@ class FinancialArtifacts:
                 if create:
                     try: os.mkdir(part,mode=0o700,dir_fd=fd)
                     except FileExistsError: pass
-                child = os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+                child = os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=fd)
                 os.close(fd); fd = child
             return fd,parts[-1]
         except BaseException:
@@ -473,9 +468,23 @@ class FinancialArtifacts:
         reference(ref); self._path(ref['path'])
         if ref['bytes'] > maximum:
             raise ValueError('financial reference exceeds file bound')
+        identity = (ref['file_sha256'],ref['bytes'])
+        previous = self._read_files.get(ref['path'])
+        if previous is not None and previous != identity:
+            raise ValueError('retained artifact path rebound to different bytes')
+        if previous is None:
+            source = ref['path'].startswith('financial/source/source-')
+            metadata = ref['path'].startswith('financial/') and not source
+            if (self._read_total+ref['bytes'] > 4*1024**3 or
+                    source and self._read_source+ref['bytes'] > MAX_METADATA or
+                    metadata and self._read_metadata+ref['bytes'] > MAX_METADATA):
+                raise ValueError('global financial read inventory byte cap exceeded')
+            self._read_files[ref['path']] = identity; self._read_total += ref['bytes']
+            if source: self._read_source += ref['bytes']
+            if metadata: self._read_metadata += ref['bytes']
         directory,name = self._open_parent(ref['path'])
         try:
-            fd = os.open(name,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=directory)
+            fd = os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=directory)
             try:
                 before = os.fstat(fd)
                 if not stat.S_ISREG(before.st_mode) or before.st_size != ref['bytes']:
@@ -489,7 +498,10 @@ class FinancialArtifacts:
                 identity = lambda info: (info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
                 if identity(before) != identity(after) or len(chunks) != ref['bytes'] or hashlib.sha256(chunks).hexdigest() != ref['file_sha256']:
                     raise ValueError('original financial file changed or hash differs')
-                return decode(bytes(chunks),maximum)
+                value = decode(bytes(chunks),maximum)
+                if bytes(chunks) != encode(value,maximum,newline=True):
+                    raise ValueError('exact canonical financial artifact bytes plus LF required')
+                return value
             finally: os.close(fd)
         finally: os.close(directory)
 
@@ -571,6 +583,38 @@ class FinancialArtifacts:
         self._section_files[section,'page'] = first_page+len(pages)
         self._section_files[section,'index'] = first_index+index_count
         return dict(row_count=count,page_count=len(pages),index_page_count=index_count,index_tail=tail)
+
+    def assert_financial_inventory(self):
+        """Known retained financial files cannot be omitted to obtain a pass."""
+        self._check(); found = set(); count = 0
+        try: financial = os.open('financial',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=self._fd)
+        except FileNotFoundError:
+            if any(path.startswith('financial/') for path in self._read_files):
+                raise ValueError('retained financial directory disappeared')
+            return
+        try:
+            sections = []
+            with os.scandir(financial) as listing:
+                for item in listing:
+                    if len(sections) >= 7: raise ValueError('unknown financial directory section')
+                    sections.append(item)
+            for section in sections:
+                if section.name not in (*PAGE_KINDS,'settlements') or not section.is_dir(follow_symlinks=False):
+                    raise ValueError('unknown/nonowned financial directory entry')
+                fd = os.open(section.name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=financial)
+                try:
+                    with os.scandir(fd) as listing:
+                        for item in listing:
+                            count += 1
+                            if count > 524288: raise ValueError('financial file inventory capacity exceeded')
+                            path = 'financial/'+section.name+'/'+item.name
+                            self._path(path)
+                            if not item.is_file(follow_symlinks=False): raise ValueError('regular original financial artifact required')
+                            found.add(path)
+                finally: os.close(fd)
+        finally: os.close(financial)
+        if found != {path for path in self._read_files if path.startswith('financial/')}:
+            raise ValueError('orphan/omitted original financial evidence or late invoice')
 
 
 def iter_financial_rows(store,section,index):

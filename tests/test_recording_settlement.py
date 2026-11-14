@@ -29,6 +29,15 @@ def setup():
     return c,decision,request,recorder,binding
 
 
+def scenario():
+    document = invoice(); line = document['lines'][0]
+    value = {key:document[key] for key in ('provider','revision','account_scope','invoice_id','currency','currency_unit')}
+    value.update({key:line[key] for key in ('line_id','stream_id','component_id','resource_id','lane_id','operation_key','source_quantity','quantity','billed_atomic')})
+    value.update(schema_version=1,kind='synthetic_recording_charge_scenario',evidence_class='fixture',authority=document['authority'],
+        adapter_id='fixture',currency_unit='USD.micro',pricing_revision='v1',components={'other':4})
+    return value
+
+
 def receipt(recorder,request,billed=4):
     document = invoice(); document['currency_unit'] = 'USD.micro'; document['lines'][0]['billed_atomic'] = billed
     source = encode(document,newline=True); source_hash = hashlib.sha256(source).hexdigest()
@@ -46,6 +55,22 @@ def receipt(recorder,request,billed=4):
 
 
 class RecordingSettlement(unittest.TestCase):
+    def test_frozen_scenario_generates_downstream_actual_time_without_digest_cycle(self):
+        c,d,t,recorder,binding = setup(); value = scenario(); adapter = adapters()
+        inventory = dict(schema_version=1,kind='recording_financial_adapters',adapters=list(adapter.adapters))
+        before = time.monotonic_ns()
+        issued = recorder.generate_synthetic_receipt(t,value,expected_scenario_sha256=digest(value),
+            adapter_inventory=encode(inventory,newline=True),expected_adapter_inventory_sha256=adapter.digest)
+        after = time.monotonic_ns()
+        from benchmarks.recording_financial import decode
+        source,evidence = map(decode,recorder.generated_artifacts(t))
+        event = source['lines'][0]['service_event_ns']
+        self.assertLessEqual(before,event); self.assertLessEqual(event,after)
+        self.assertIsNone(evidence['finality_evidence_sha256'])
+        self.assertEqual(source['lines'][0]['operation_key'],value['operation_key'])
+        recorder.settle(t,issued,now_ms=1001)
+        self.assertEqual(c.snapshot()['budget']['spent_known'],4)
+
     def test_actual_transition_captured_before_finished_request_retirement(self):
         c,d,t,recorder,binding = setup(); finish(c,t,d,1001)
         issued = receipt(recorder,t)

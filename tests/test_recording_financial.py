@@ -80,7 +80,7 @@ class RecordingFinancial(unittest.TestCase):
                 validate_financial_evidence(bad,adapters=adapter,invoice=document,source_reference=ref)
 
     def test_bounded_exclusive_pages_and_exact_reader(self):
-        with tempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as root:
             with FinancialArtifacts(root) as store:
                 ref = store.write_invoice(invoice())
                 self.assertEqual(store.read(ref),invoice())
@@ -91,17 +91,20 @@ class RecordingFinancial(unittest.TestCase):
                 self.assertEqual(list(iter_financial_rows(store,'source',index)),rows)
                 empty = store.write_index('finality',[])
                 self.assertEqual(list(iter_financial_rows(store,'finality',empty)),[])
+                second = store.write_index('source',[dict(source_document=ref)])
+                self.assertNotEqual(second['index_tail']['path'],index['index_tail']['path'])
+                self.assertEqual(list(iter_financial_rows(store,'source',second)),[dict(source_document=ref)])
                 bad = copy.deepcopy(index); bad['row_count'] -= 1
                 with self.assertRaises(ValueError): list(iter_financial_rows(store,'source',bad))
 
     def test_symlink_and_mutated_original_bytes_reject(self):
-        with tempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as root:
             with FinancialArtifacts(root) as store:
                 ref = store.write_invoice(invoice())
                 path = Path(root,ref['path']); original = path.read_bytes()
                 path.write_bytes(original.replace(b'line-1',b'line-2'))
                 with self.assertRaises(ValueError): store.read(ref)
-        with tempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as root:
             Path(root,'financial').symlink_to(Path(root),target_is_directory=True)
             with FinancialArtifacts(root) as store:
                 with self.assertRaises(OSError): store.write_invoice(invoice())

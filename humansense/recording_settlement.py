@@ -36,6 +36,10 @@ OUTPUT_GRAMMAR = dict(schema_version=1,kind='synthetic_invoice_fixture_output_gr
     receipt_authenticity_verified=False)
 _ISSUER = object()
 _COMPONENTS = {'input','output','cache_read','cache_write','media','text_consumer','local_compute','other'}
+SCENARIO_FIELDS = ('schema_version','kind','evidence_class','authority','adapter_id','provider','revision',
+    'account_scope','invoice_id','line_id','stream_id','component_id','resource_id','lane_id','operation_key',
+    'source_quantity','quantity','billed_atomic','currency','currency_unit','pricing_revision','components')
+INPUT_GRAMMAR['scenario_fields'] = list(SCENARIO_FIELDS)
 
 
 def _keys(value,fields):
@@ -131,6 +135,29 @@ class FrozenRecordingReceipt:
             object.__setattr__(self,key,value)
 
 
+def validate_synthetic_charge_scenario(value):
+    value = bounded_json(value,max_bytes=65536)
+    _keys(value,SCENARIO_FIELDS)
+    if (type(value['schema_version']) is not int or value['schema_version'] != 1 or
+            value['kind'] != 'synthetic_recording_charge_scenario' or value['evidence_class'] != 'fixture' or
+            value['authority'] != AUTHORITY): raise ValueError('explicit synthetic charge scenario required')
+    for key in ('adapter_id','provider','revision','account_scope','invoice_id','line_id','stream_id','component_id',
+                'resource_id','lane_id','currency','currency_unit','pricing_revision'): identifier(value[key])
+    # Reuse the original-line grammar for all quantity/owner-key bounds.
+    line = {key:deepcopy(value[key]) for key in LINE_FIELDS if key not in ('service_start_ns','service_end_ns','service_event_ns')}
+    line.update(service_start_ns=None,service_end_ns=None,service_event_ns=0)
+    document = {key:value[key] for key in ('provider','revision','account_scope','invoice_id','currency','currency_unit')}
+    document.update(schema_version=1,kind='synthetic_recording_invoice',evidence_class='fixture',authority=AUTHORITY,lines=[line])
+    validate_synthetic_invoice(document)
+    if value['operation_key'] is None: raise ValueError('semantic scenario requires actual callback operation key')
+    components = value['components']
+    if type(components) is not dict or not components or not set(components) <= _COMPONENTS:
+        raise ValueError('explicit scenario charge components required')
+    if sum(_int(amount,10**18) for amount in components.values()) != value['billed_atomic']:
+        raise ValueError('scenario components must equal original billed amount')
+    return value
+
+
 class RecordingSettlementRecorder:
     """Bound to one controller; retains only opaque financial ownership."""
     def __init__(self,controller,*,execution_sha256,controller_id,unit,pricing_revision,max_receipts=16384):
@@ -143,12 +170,81 @@ class RecordingSettlementRecorder:
         self._maximum = _int(max_receipts,16384)
         if not self._maximum: raise ValueError('positive recording receipt bound required')
         self._bindings = {}; self._issued = {}; self._records = {}; self._claims = set(); self._binding_entries = {}
+        self._registered = {}; self._generated = {}; self._generated_bytes = 0
         with controller._lock:
             if controller._recording_settlement_recorder is not None:
                 raise ValueError('controller recording settlement owner cannot be rebound')
             if (controller._budget.unit,controller._budget.pricing_revision) != (self.unit,self.pricing_revision):
                 raise ValueError('frozen receipt monetary unit/revision differs from actual budget')
             controller._recording_settlement_recorder = self
+
+    def register_request(self,request_id,request_decision_sha256):
+        """Freeze exact request identity before adapter.execute, never currenttask."""
+        identifier(request_id); _sha(request_decision_sha256)
+        with self._controller._lock:
+            request = self._controller._request(request_id)
+            if request['state'] != 'pending' or request['decision']['decision_sha256'] != request_decision_sha256:
+                raise ValueError('original pending request/decision required')
+            if request_decision_sha256 in self._registered or request_id in self._registered.values():
+                raise ValueError('single immutable request decision registration required')
+            if len(self._registered) >= self._maximum: raise ValueError('recording request lookup capacity exhausted')
+            self._registered[request_decision_sha256] = request_id
+
+    def bind_entry(self,entry_binding):
+        from .native_entry import NativeEntryBinding
+        if type(entry_binding) is not NativeEntryBinding: raise TypeError('actual immutable native entry required')
+        decision = entry_binding.snapshot()['entry'].get('request_decision_sha256')
+        with self._controller._lock:
+            request_id = self._registered.get(decision)
+            if request_id is None: raise ValueError('actual entry has no registered original request')
+            self.bind_request(request_id,entry_binding)
+            return request_id
+
+    def generate_synthetic_receipt(self,request_id,scenario,*,expected_scenario_sha256,
+                                   adapter_inventory,expected_adapter_inventory_sha256):
+        """Generate downstream original fixture bytes at actual entered time.
+
+        The upstream response table hashes this scenario, never a future invoice
+        whose actual service timestamp did not exist at declaration time.
+        """
+        scenario = validate_synthetic_charge_scenario(scenario)
+        if _digest(scenario) != _sha(expected_scenario_sha256): raise ValueError('frozen synthetic charge scenario changed')
+        if (scenario['currency_unit'],scenario['pricing_revision']) != (self.unit,self.pricing_revision):
+            raise ValueError('scenario monetary identity differs from actual controller')
+        with self._controller._lock:
+            binding = self._bindings.get(request_id)
+            if binding is None or request_id in self._generated: raise ValueError('single actual entered scenario generation required')
+            key = tuple(scenario['operation_key'][name] for name in ('invocation_ordinal','binding_index','call_ordinal'))
+            if key != binding[1:]: raise ValueError('scenario does not name original actual binding/call ordinal')
+            now = time.monotonic_ns()
+            line = {name:deepcopy(scenario[name]) for name in LINE_FIELDS if name not in ('service_start_ns','service_end_ns','service_event_ns')}
+            line.update(service_start_ns=None,service_end_ns=None,service_event_ns=now)
+            invoice = {name:scenario[name] for name in ('provider','revision','account_scope','invoice_id','currency','currency_unit')}
+            invoice.update(schema_version=1,kind='synthetic_recording_invoice',evidence_class='fixture',authority=AUTHORITY,lines=[line])
+            source = _canonical(invoice)+b'\n'; source_hash = hashlib.sha256(source).hexdigest()
+            claim = _digest(['gamst.recording.claim.v1',scenario['provider'],scenario['account_scope'],scenario['invoice_id'],scenario['line_id']])
+            evidence = dict(schema_version=1,kind='recording_financial_evidence',adapter_id=scenario['adapter_id'],
+                adapter_inventory_sha256=expected_adapter_inventory_sha256,origin='synthetic_fixture',
+                source_document=dict(path='financial/source/source-'+source_hash+'.json',file_sha256=source_hash,bytes=len(source)),
+                provider=scenario['provider'],revision=scenario['revision'],account_scope=scenario['account_scope'],
+                invoice_id=scenario['invoice_id'],line_id=scenario['line_id'],claim_sha256=claim,owner_instance=binding[0],
+                stream_id=scenario['stream_id'],quantities={scenario['component_id']:scenario['source_quantity']},
+                billed_atomic=scenario['billed_atomic'],currency=scenario['currency'],currency_unit=scenario['currency_unit'],
+                service_start_ns=None,service_end_ns=None,service_event_ns=now,observed_received_ns=now,finality_evidence_sha256=None)
+            evidence_bytes = _canonical(evidence)+b'\n'
+            if self._generated_bytes+len(source)+len(evidence_bytes) > 64*1024**2:
+                raise ValueError('synthetic receipt retained byte capacity exhausted')
+            receipt = self.synthetic_receipt(request_id,source_document=source,financial_evidence=evidence_bytes,
+                adapter_inventory=adapter_inventory,expected_adapter_inventory_sha256=expected_adapter_inventory_sha256,
+                components=scenario['components'])
+            self._generated_bytes += len(source)+len(evidence_bytes)
+            self._generated[request_id] = (source,evidence_bytes)
+            return receipt
+
+    def generated_artifacts(self,request_id):
+        with self._controller._lock:
+            if request_id not in self._generated: raise ValueError('no generated original fixture artifacts')
+            return self._generated[request_id]
 
     def bind_request(self,request_id,entry_binding):
         """Bind an actual dispatched request while it is still owned/opaque."""
@@ -214,6 +310,8 @@ class RecordingSettlementRecorder:
                 evidence['kind'] != 'recording_financial_evidence' or evidence['origin'] != 'synthetic_fixture' or
                 evidence['adapter_inventory_sha256'] != expected_adapter_inventory_sha256 or
                 evidence['currency_unit'] != self.unit): raise ValueError('exact original fixture evidence/unit required')
+        if evidence['finality_evidence_sha256'] is not None:
+            raise ValueError('initial F1 finality is a downstream closure join, never a cyclic receipt pointer')
         ref = evidence['source_document']; _keys(ref,('path','file_sha256','bytes'))
         original_hash = hashlib.sha256(source_document).hexdigest()
         if (ref['path'] != 'financial/source/source-'+original_hash+'.json' or
