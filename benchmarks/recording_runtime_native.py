@@ -149,12 +149,12 @@ class RuntimeParentNativeChannel(ParentNativeChannel):
             retain_financial_documents=retain_financial_documents,preflight=preflight,bundles=bundles)
 
     def _load_original_declarations(self):
-        return load_runtime_declarations(self.bootstrap,latency_policy=self._runtime_latency,
+        return load_runtime_declarations(self.bootstrap,latency_policy=snapshot(self._runtime_latency),
             source_bundles=snapshot(self._runtime_sources),numeric_inputs=None if self._runtime_numeric is None else snapshot(self._runtime_numeric))
 
     def _validate_original_inventory(self):
         return validate_runtime_native_inventory(self.declarations,self.output,
-            source_inventory=self.declarations['source_manifest'],latency_policy=self._runtime_latency,
+            source_inventory=self.declarations['source_manifest'],latency_policy=snapshot(self._runtime_latency),
             source_bundles=snapshot(self._runtime_sources),numeric_inputs=None if self._runtime_numeric is None else snapshot(self._runtime_numeric))
 
 
