@@ -18,7 +18,7 @@ class Coordinator(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp=tempfile.TemporaryDirectory(dir='.');self.addCleanup(self.tmp.cleanup)
         self.root=Path(self.tmp.name).resolve();(self.root/'inputs').mkdir();(self.root/'stage').mkdir();(self.root/'runs').mkdir()
-        self.fixture=build_runtime_fixture(self.root/'inputs',count=20,duration_ns=2_000_000_000,dependency_evidence=self.dependencies)
+        self.fixture=build_runtime_fixture(self.root/'inputs',count=20,duration_ns=2_000_000_000,task_snapshot_ns=1_500_000_000,dependency_evidence=self.dependencies)
         self.inputs=await OwnedRuntimeInputs.open(str(self.fixture.root),expected_execution_sha256=self.fixture.execution_sha256s[0],invocation_ordinal=0)
         self.addAsyncCleanup(self.inputs.close)
 
