@@ -24,11 +24,34 @@ class RecordingEvaluationSession(RecordingScopeOwner):
                     retain_evaluation_hashes=False, retain_financial_documents=False, collection_declarations=None):
         if retain_evaluation_hashes is not True:
             raise PermissionError('separate external evaluation hash retention consent required')
-        self=cls(); self._declarations=validate_recording_scope_protocol(declarations)
-        bundles=[self.declarations] if collection_declarations is None else collection_declarations
-        self.preflight=(preflight_native_capacity(self.declarations['collection'])
-            if collection_declarations is None and len(self.declarations['collection']['recordings'])>1
+        d=validate_recording_scope_protocol(declarations)
+        bundles=[d] if collection_declarations is None else collection_declarations
+        preflight=(preflight_native_capacity(d['collection'])
+            if collection_declarations is None and len(d['collection']['recordings'])>1
             else preflight_recording_collection(bundles))
+        return cls._from_admitted(d,writer,run_nonce=run_nonce,execution_ordinal=execution_ordinal,
+            retain_financial_documents=retain_financial_documents,preflight=preflight,bundles=bundles)
+
+    @classmethod
+    def from_runtime_frozen(cls,declarations,writer,*,latency_policy,source_bundles,numeric_inputs=None,
+                            run_nonce,execution_ordinal,retain_evaluation_hashes=False,
+                            retain_financial_documents=False,collection_declarations=None):
+        if retain_evaluation_hashes is not True:
+            raise PermissionError('separate external evaluation hash retention consent required')
+        from .recording_runtime_native import validate_runtime_scope_protocol,preflight_runtime_collection
+        d=validate_runtime_scope_protocol(declarations,latency_policy=latency_policy,
+            source_bundles=source_bundles,numeric_inputs=numeric_inputs)
+        bundles=[d] if collection_declarations is None else collection_declarations
+        preflight=(preflight_native_capacity(d['collection'])
+            if collection_declarations is None and len(d['collection']['recordings'])>1
+            else preflight_runtime_collection(bundles,latency_policy=latency_policy,
+                source_bundles=source_bundles,numeric_inputs=numeric_inputs))
+        return cls._from_admitted(d,writer,run_nonce=run_nonce,execution_ordinal=execution_ordinal,
+            retain_financial_documents=retain_financial_documents,preflight=preflight,bundles=bundles)
+
+    @classmethod
+    def _from_admitted(cls,d,writer,*,run_nonce,execution_ordinal,retain_financial_documents,preflight,bundles):
+        self=cls();self._declarations=d;self.preflight=preflight
         if self.preflight['collection_sha256']!=digest(self.declarations['collection']):
             raise ValueError('collection preflight belongs to another frozen collection')
         if not any(digest(v)==digest(self.declarations) for v in bundles):

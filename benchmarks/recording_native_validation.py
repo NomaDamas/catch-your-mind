@@ -134,7 +134,12 @@ def validate_recording_native_inventory(declarations,index,terminal=None,*,sourc
     optional terminal argument is an expected file digest. `source_inventory`
     must retain the exact original manifest; mapping remains separately observed.
     """
-    d=validate_recording_scope_protocol(declarations);directory=Path(index)
+    d=validate_recording_scope_protocol(declarations)
+    return _validate_native_inventory_common(d,index,terminal,source_inventory=source_inventory)
+
+
+def _validate_native_inventory_common(d,index,terminal=None,*,source_inventory=None):
+    directory=Path(index)
     term,_=_json_file(directory,'terminal.json',65536,terminal)
     required=('schema_version','kind','context','state','mapping_sha256','index_tail_sha256','page_count',
         'chunk_count','event_count','entry_count','reservation_count','released_count','outstanding_tickets',

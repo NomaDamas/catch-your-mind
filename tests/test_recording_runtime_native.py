@@ -58,3 +58,35 @@ class RuntimeNative(unittest.TestCase):
         d,l,bundles=runtime_declarations();other=deepcopy(bundles)
         other['original']['tasks'][0]['input']['question']='different question'
         with self.assertRaises(ValueError):validate_runtime_scope_protocol(d,latency_policy=l,source_bundles=other)
+
+
+class RuntimeActualEntry(unittest.IsolatedAsyncioTestCase):
+    async def test_runtime_factory_enters_actual_source_callback_and_new_reader_only(self):
+        import tempfile
+        from pathlib import Path
+        from benchmarks.recording_evaluation import RecordingEvaluationSession
+        from benchmarks.recording_native_schema import run_context
+        from benchmarks.recording_native_writer import RecordingNativeWriter
+        from benchmarks.recording_native_validation import validate_recording_native_inventory
+        from benchmarks.recording_runtime_native import validate_runtime_native_inventory
+        from benchmarks.replay_clock import ReplayClock
+        d,l,bundles=runtime_declarations()
+        with tempfile.TemporaryDirectory(dir='.') as temporary:
+            writer=await RecordingNativeWriter.open(Path(temporary)/'native',run_context(d,'a'*64,1))
+            owner=RecordingEvaluationSession.from_runtime_frozen(d,writer,latency_policy=l,
+                source_bundles=bundles,run_nonce='a'*64,execution_ordinal=1,retain_evaluation_hashes=True)
+            self.addAsyncCleanup(owner.close)
+            entered=[]
+            def callback():entered.append(True);return {'value':'actual callback'}
+            owner.bind_backend(1,callback,'in_process')
+            clock=ReplayClock(d['source_manifest']);owner.bind_mapping(clock.mapping,clock.sha256)
+            ref=dict(kind='capture',source_index=0,capture_ordinal=0,
+                record_sha256=digest(d['source_manifest']['records'][0]),mapping_sha256=clock.sha256)
+            ticket=owner.reserve_operation(1,owner.stream_scope(1),'process',[ref],
+                digest(dict(binding=1,operation_kind='process',capture_refs=[ref])),ref['record_sha256'])
+            ticket.invoke_sync(callback);ticket.published(True)
+            owner.backend_closed(1,callback);await owner.close()
+            with self.assertRaises(ValueError):validate_recording_native_inventory(d,writer.output,source_inventory=d['source_manifest'])
+            index=validate_runtime_native_inventory(d,writer.output,source_inventory=d['source_manifest'],
+                latency_policy=l,source_bundles=bundles)
+            self.assertEqual(index.count,1);self.assertEqual(entered,[True])

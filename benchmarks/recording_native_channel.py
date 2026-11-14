@@ -130,7 +130,7 @@ def validate_bootstrap(bootstrap):
     return bootstrap
 
 
-def load_declarations(bootstrap):
+def _load_declaration_documents(bootstrap):
     validate_bootstrap(bootstrap)
     result={};total=0
     for name,path in bootstrap['paths'].items():
@@ -148,7 +148,11 @@ def load_declarations(bootstrap):
             total+=len(data)
             result[name]=decode(bytes(data),MAX_DECLARATIONS)
         finally:os.close(fd)
-    result=validate_recording_scope_protocol(result)
+    return result
+
+
+def load_declarations(bootstrap):
+    result=validate_recording_scope_protocol(_load_declaration_documents(bootstrap))
     context=run_context(result,bootstrap['nonce'],bootstrap['invocation_ordinal'])
     for name in ('collection_sha256','scope_protocol_sha256','instrumentation_protocol_sha256'):
         if bootstrap[name]!=context[name]:raise ValueError('bootstrap declaration identity mismatch')
@@ -201,10 +205,17 @@ class NativeRunInventory(_FrozenDict):
 
 class ParentNativeChannel:
     def __init__(self,context,declarations,*,paths,output,deadline_ns,budget=None,retain_financial_documents=False,collection_declarations=None):
-        self.declarations=_freeze(validate_recording_scope_protocol(declarations))
+        d=validate_recording_scope_protocol(declarations)
         from .recording_native_schema import preflight_recording_collection
-        bundles=[self.declarations] if collection_declarations is None else collection_declarations
-        self.preflight=preflight_recording_collection(bundles)
+        bundles=[d] if collection_declarations is None else collection_declarations
+        preflight=preflight_recording_collection(bundles)
+        return self._initialize(context,d,paths=paths,output=output,deadline_ns=deadline_ns,
+            budget=budget,retain_financial_documents=retain_financial_documents,
+            preflight=preflight,bundles=bundles)
+
+    def _initialize(self,context,declarations,*,paths,output,deadline_ns,budget,
+                    retain_financial_documents,preflight,bundles):
+        self.declarations=_freeze(declarations);self.preflight=preflight
         if self.preflight['collection_sha256']!=digest(self.declarations['collection']) or not any(digest(v)==digest(self.declarations) for v in bundles):
             raise ValueError('parent preflight requires exact current original recording')
         if type(retain_financial_documents) is not bool or retain_financial_documents is not self.declarations['scope_protocol']['retain_financial_documents']:
@@ -229,6 +240,13 @@ class ParentNativeChannel:
         self._native_sequence=0;self._native_previous=digest(['gamst.recording.events.v1',self.context]);self._native_time=0
         self._native_entries=0;self._collect_task=None;self._collect_active=False;self._abort_task=None;self._closed=False
         self._threads=set();self._terminal_digest=None
+
+    def _load_original_declarations(self):return load_declarations(self.bootstrap)
+
+    def _validate_original_inventory(self):
+        from .recording_native_validation import validate_recording_native_inventory
+        return validate_recording_native_inventory(self.declarations,self.output,
+            source_inventory=self.declarations['source_manifest'])
 
     def prepare(self,environment,remaining_seconds=None):
         if FD_ENVIRONMENT_KEY in environment:raise ValueError('channel FD must be sole explicit transport delta')
@@ -462,7 +480,7 @@ class ParentNativeChannel:
             await self._thread(self._create)
             # Read parent snapshots too: caller-supplied dict cannot hide a changed
             # on-disk bootstrap declaration consumed by the child.
-            loaded=await self._thread(load_declarations,self.bootstrap)
+            loaded=await self._thread(self._load_original_declarations)
             if encoded(loaded)!=encoded(self.declarations):raise ValueError('parent frozen snapshot differs')
             limit=min(self.bootstrap['deadline_ns'],time.monotonic_ns()+self.declarations['instrumentation_protocol']['hello_timeout_ms']*1000000)
             await _deadline(asyncio.get_running_loop().sock_sendall(self.parent,frame(self.bootstrap)),limit)
@@ -494,9 +512,7 @@ class ParentNativeChannel:
                 else:await self._thread(self._metadata,kind,fields)
                 self.sequence+=1
             ref=await self._thread(self._save,'terminal.json',_line(self.terminal));self._terminal_digest=ref['sha256']
-            from .recording_native_validation import validate_recording_native_inventory
-            self.validated_index=await self._thread(lambda:validate_recording_native_inventory(self.declarations,self.output,
-                source_inventory=self.declarations['source_manifest']))
+            self.validated_index=await self._thread(self._validate_original_inventory)
             if self.terminal['state']!='closed':self.reason='native_incomplete'
             return self.snapshot()
         except asyncio.CancelledError:
