@@ -9,7 +9,25 @@ from unittest.mock import patch
 from recording_abc_fixtures import build_runtime_fixture, installed_dependencies
 from benchmarks.recording_coordinator import _preflight, _run_one
 from benchmarks.recording_runtime_inputs import OwnedRuntimeInputs
-from benchmarks.recording_runtime_validation import ValidatedRecordingRun, validate_recording_run
+from benchmarks.recording_runtime_validation import (ValidatedRecordingRun, validate_recording_run,
+    preflight_recording_run_validation)
+
+
+class JoinAdmission(unittest.TestCase):
+    def test_joint_peak_and_retained_bounds_without_activation(self):
+        execution=dict(schema_version=1,kind='recording_execution',runtime_policy_sha256='a'*64,
+            collection_sha256='b'*64,scope_protocol_sha256='c'*64,instrumentation_protocol_sha256='d'*64,
+            invocation_ordinal=0,recording_index=0,arm='A',stream_id='stream-A',execution_namespace='run-A',
+            cache_namespace='cache-A',asset_inventory_sha256='e'*64)
+        declaration=dict(collection=dict(capacity=dict(max_entries_per_run=16,max_events_per_run=128,
+            max_chunks_per_run=8,max_reservations_per_run=32),arms=[dict(arm='A',provider_bindings=[{}])]),
+            source_manifest=dict(records=[{},{}]),tasks=[{}])
+        bounds=preflight_recording_run_validation(declaration,execution,publication_rows=8)
+        self.assertGreater(bounds['peak_workspace_bytes'],bounds['retained_workspace_bytes'])
+        larger=preflight_recording_run_validation(declaration,execution,publication_rows=9)
+        self.assertGreater(larger['peak_workspace_bytes'],bounds['peak_workspace_bytes'])
+        with self.assertRaises(ValueError):
+            preflight_recording_run_validation(declaration,execution,publication_rows=262144)
 
 
 class OriginalRunJoin(unittest.IsolatedAsyncioTestCase):

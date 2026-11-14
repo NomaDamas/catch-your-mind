@@ -35,6 +35,38 @@ class _JoinBudget:
         if self.used>_MAX_JOIN_BYTES:raise ValueError('actual retained run join exceeds128MiB joint workspace')
 
 
+def preflight_recording_run_validation(declarations,execution,*,publication_rows):
+    """Pure conservative initial-driver join admission, before opening outputs.
+
+    The parent holds its input workspace plus the largest active run peak and
+    the SUM of retained prior runs. Independent maxima cannot reset that sum.
+    """
+    from .recording_native_validation import ENTRY
+    validate_execution(execution)
+    cap=declarations['collection']['capacity'];entries=cap['max_entries_per_run'];events=cap['max_events_per_run']
+    records=len(declarations['source_manifest']['records']);tasks=len(declarations['tasks'])
+    bindings=len(next(a['provider_bindings'] for a in declarations['collection']['arms'] if a['arm']==execution['arm']))
+    integer(publication_rows,0,262144)
+    declarations_bytes=8*len(encoded(declarations))+16384
+    packed=entries*(ENTRY.size+1+96+64)+cap['max_chunks_per_run']*8192
+    held=declarations_bytes+packed+tasks*8192+min(entries,256)*4096+65536
+    temporary=(records*9+cap['max_reservations_per_run']*5+entries*(8*8192+1024)+
+        (events//2)*(8*2048+1024)+publication_rows*(8*2048+1024)+
+        (tasks+1)*bindings*(8*2048+1024)+4*1024**2)
+    peak=held+temporary
+    if peak>_MAX_JOIN_BYTES:raise ValueError('declared joint run validation workspace exceeds128MiB')
+    return dict(peak_workspace_bytes=peak,retained_workspace_bytes=held)
+
+
+def _retained_workspace(index,values):
+    total=sum(len(encoded(value))+1024 for value in values)
+    if index is not None:
+        total+=sum(len(getattr(index,name)) for name in ('entries','flags','hashes','settlements'))
+        total+=8*len(encoded(dict(declarations=index.declarations,terminal=index.terminal,chunks=index.chunk_refs)))+16384
+        total+=8*index.financial_bytes
+    return total
+
+
 def _copy(value):return decode(encoded(value),_MAX_JOIN_BYTES)
 
 
@@ -49,6 +81,7 @@ class ValidatedRecordingRun:
     _task_rows:bytes
     _native_index:object
     _controller_settlements:bytes
+    _retained_workspace_bytes:int
 
     def __init__(self,execution,run_inventory,task_receipts,financial_values,source_coverage,task_rows,native_index,controller_settlements=(),*,_issuer=None):
         if _issuer is not _ISSUER:raise TypeError('complete original recording join must issue this value')
@@ -57,6 +90,8 @@ class ValidatedRecordingRun:
             object.__setattr__(self,'_'+name,encoded(value))
         object.__setattr__(self,'_native_index',native_index)
         object.__setattr__(self,'_controller_settlements',encoded(list(controller_settlements)))
+        object.__setattr__(self,'_retained_workspace_bytes',_retained_workspace(native_index,
+            (execution,run_inventory,task_receipts,financial_values,source_coverage,task_rows,list(controller_settlements))))
 
     @property
     def execution(self):return decode(self._execution)
@@ -76,6 +111,13 @@ class ValidatedRecordingRun:
     def controller_settlements(self):return decode(self._controller_settlements,1024**2)
     @property
     def controller_settlement_inventory_sha256(self):return hashlib.sha256(self._controller_settlements).hexdigest()
+    @property
+    def retained_workspace_bytes(self):return self._retained_workspace_bytes
+    @property
+    def runtime_completeness(self):
+        v=self.financial_values
+        return 'complete' if (v['source_comparable'] and v['clock_consistent'] and v['operational_closed'] and
+            all(r['status']=='answer' for r in self.task_receipts)) else 'incomplete'
 
 
 def _open(directory,path):

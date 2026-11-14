@@ -30,6 +30,16 @@ unsupported ownership, and unsafe filesystem aliases are rejected. The join
 uses at most128MiB of conservatively charged retained working indexes; source
 records use compact arrays and source journal events are streamed.
 
+Before activation, `preflight_recording_run_validation(declarations, execution,
+publication_rows=...)` returns conservative `peak_workspace_bytes` and
+`retained_workspace_bytes` bounds. The coordinator adds its owned input workspace
+and all previously retained run bounds; neither per-run admission nor sequential
+execution resets the collection total. The issued run exposes actual
+`retained_workspace_bytes`. Its `runtime_completeness` is `complete` only when
+original source exposure, clock, owned cleanup, and every original task answer
+are complete. Unknown external billing remains separate from this structural
+state.
+
 No legacy numeric format or acceptance gate is changed. Synthetic F1 evidence
 remains synthetic; complete structural runs do not establish real savings or
 quality acceptance.
