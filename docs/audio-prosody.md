@@ -21,8 +21,9 @@ The default window is 80 ms and the minimum output hop is 20 ms of newly submitt
 The provider requires NumPy; it is imported on explicit construction. Metadata discovery performs no download or capture. Tests execute actual numerical processing on known tones including range endpoints, silence, DC, seeded noise, clipping, stereo selection, rate changes, gaps and public context integration. These prove signal processing behavior, not real microphone or emotion-model validation. Related open work: #25 and #6.
 
 Version2 also returns bounded `spectral` and `cycles` objects. Spectral features
-use25ms Hann STFT windows with10ms hop, next-power-of-two FFT,40 triangular mel
-power bands and13 orthonormal DCT-II coefficients. Returned values are mean mel
+use25ms Hann STFT windows with10ms hop, per-frame mean subtraction,
+next-power-of-two FFT,40 triangular HTK-spaced mel power bands and13
+orthonormal DCT-II coefficients. Returned values are mean mel
 power, MFCC mean/std and normalized spectral flux, not the full spectrogram.
 Natural log uses a1e-12 floor, with no preemphasis or cepstral liftering; these
 explicit conventions are not interchangeable with another model's frontend.
