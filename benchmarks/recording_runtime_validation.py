@@ -589,6 +589,11 @@ def _settlements(directory,terminal,files,events,documents,execution,operations,
             raise ValueError('structural U1 cannot activate synthetic financial receipts')
         return []
     ref=files.get('controller-settlements.json')
+    if (terminal['state']=='failed' and summary['mapping_sha256'] is None and not operations and
+            ref is None and not events and h is None and not count and not references):
+        # Startup can fail before financial controllers exist. The failed run
+        # remains ineligible; absence here does not close any monetary ledger.
+        return []
     if ref is None or len(events)!=1:raise ValueError('U2 requires original actual SDK settlement inventory, including empty')
     rows=_json(directory,ref,maximum=1024**2,original=True)
     if (type(rows) is not list or len(rows)>256 or count!=len(rows) or h!=digest(rows) or

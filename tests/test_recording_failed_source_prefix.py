@@ -18,6 +18,10 @@ import asyncio, sys
 from benchmarks.recording_arm_runtime import RecordingArmRuntime
 from benchmarks.recording_runtime_artifacts import RecordingRuntimeArtifacts
 phase=sys.argv.pop(1)
+if phase=='preflight':
+    from benchmarks.owned_capture import OwnedCaptureSource
+    async def refuse(*args, **kwargs): raise OSError('synthetic source preflight refusal')
+    OwnedCaptureSource.preflight=refuse
 original=RecordingRuntimeArtifacts.write_metadata
 async def metadata(self, kind, value):
     if phase=='early' and kind=='mapping':
@@ -49,7 +53,8 @@ class FailedSourcePrefix(unittest.IsolatedAsyncioTestCase):
             structural=build_runtime_fixture(root/'structural',count=20,duration_ns=1_400_000_000,
                 task_snapshot_ns=900_000_000,dependency_evidence=self.dependencies)
             numeric=numeric_runtime_fixture(structural,root/'numeric')
-            for ordinal,(fixture,phase) in enumerate(((structural,'early'),(numeric,'early'),(numeric,'late'))):
+            for ordinal,(fixture,phase) in enumerate(((structural,'early'),(numeric,'early'),(numeric,'late'),
+                    (structural,'preflight'),(numeric,'preflight'))):
                 inputs=await OwnedRuntimeInputs.open(str(fixture.root),expected_execution_sha256=fixture.execution_sha256s[ordinal],invocation_ordinal=ordinal)
                 try:docs,bundles,declarations,_,budget=await _preflight(inputs)
                 finally:await inputs.close()
@@ -67,6 +72,13 @@ class FailedSourcePrefix(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(run['state'],'failed')
                     self.assertFalse(joined.financial_values['source_comparable'])
                     self.assertIn('source_mapping_incomplete',joined.financial_values['violations'])
+                    if phase=='preflight':
+                        self.assertEqual(joined.source_coverage['actual_capture_count'],0)
+                        self.assertEqual(joined.source_coverage['uninspected_count'],3)
+                        self.assertEqual(joined.controller_settlements,[])
+                        self.assertTrue(all(r['status']=='not_executed' for r in joined.task_receipts))
+                        self.assertIsNone(run['child_summary'])
+                        continue
                     self.assertGreater(joined.source_coverage['actual_capture_count'],0)
                     self.assertEqual(joined.source_coverage['mapping_sha256'],joined.native_index.terminal['mapping_sha256'])
                     if phase=='early':

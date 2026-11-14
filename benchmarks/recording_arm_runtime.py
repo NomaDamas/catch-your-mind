@@ -77,6 +77,7 @@ class RecordingArmRuntime:
         try:
             await self._startup();return self
         except BaseException:
+            self._fail('startup_failed')
             await self.close();raise
 
     def _fail(self,reason):self.failures[reason]=self.failures.get(reason,0)+1
@@ -328,7 +329,14 @@ class RecordingArmRuntime:
             finally:self.finance.close()
         self.cleanup_finished_ns=time.monotonic_ns()
         if self.journal is not None:
-            counters=[] if self.source is None else self.source.counters()
+            # Acquisition is never started before a successful source preflight.
+            # These are uninspected declared records, not verified zero work for
+            # a source whose replay actually started.
+            counters=self.source.counters() if self.source is not None else [dict(
+                source_index=n,source_id=s['source_id'],declared=count,attempted=0,captured=0,dropped=0,
+                verified_reads=0,offered=0,admitted=0,refused=0,uninspected_suffix=count)
+                for n,s in enumerate(self.manifest['sources'])
+                for count in [sum(r['source_id']==s['source_id'] for r in self.manifest['records'])]]
             self._source_terminal=await self.journal.close(dict(state='failed' if self.failures else 'replayed_unscored',
                 failure_category=next(iter(self.failures),None),mapping_sha256=None if self.clock is None else self.clock.sha256,
                 counters=counters,controller_settlement_inventory_sha256=settlement_sha,controller_settlement_count=len(settlements),
