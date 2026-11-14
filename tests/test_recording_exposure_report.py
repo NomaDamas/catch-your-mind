@@ -2,6 +2,7 @@ import copy
 from fractions import Fraction
 import hashlib
 import unittest
+from decimal import localcontext
 
 from benchmarks.recording_financial import digest,encode,decode
 from benchmarks.recording_lifetime_ledger import validate_validity_chain
@@ -29,6 +30,14 @@ def quality_fixture():
 
 
 class QualityLatency(unittest.TestCase):
+    def test_original_precision_is_independent_of_callers_decimal_context(self):
+        plan,rows,assessment,receipts=quality_fixture()
+        baseline=compare_quality_latency(plan,assessment,receipts,expected_assessment_sha256=plan_digest(assessment))
+        with localcontext() as context:
+            context.prec=2
+            changed=compare_quality_latency(plan,assessment,receipts,expected_assessment_sha256=plan_digest(assessment))
+        self.assertEqual(changed.reports,baseline.reports)
+
     def test_exact_original_math_without_fake_cost_or_usage(self):
         plan,rows,assessment,receipts = quality_fixture(); old = run(plan,rows)
         result = compare_quality_latency(plan,assessment,receipts,expected_assessment_sha256=plan_digest(assessment))

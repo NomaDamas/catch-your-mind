@@ -1,6 +1,6 @@
 """Original paired quality/latency and recording-exposure reconciliation v2."""
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal,Context,localcontext
 from fractions import Fraction
 import hashlib
 import math
@@ -41,6 +41,13 @@ class ValidatedQualityLatency:
 
 
 def compare_quality_latency(plan,assessment,receipts,*,expected_assessment_sha256):
+    # Preserve the original comparator's precision and isolation from caller
+    # decimal settings, including the full accepted finite-float exponent range.
+    with localcontext(Context(prec=400)):
+        return _compare_quality_latency(plan,assessment,receipts,expected_assessment_sha256=expected_assessment_sha256)
+
+
+def _compare_quality_latency(plan,assessment,receipts,*,expected_assessment_sha256):
     """Same original task bootstrap/critical facts and p95 target, no fake cost.
 
     Original exact parent receipts are supplied in original task/arm order.
