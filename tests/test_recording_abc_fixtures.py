@@ -35,6 +35,12 @@ class ActualInputs(unittest.IsolatedAsyncioTestCase):
         d=fixture.documents; c=d['runtime/collection.json']; u=d['runtime/policy.json']
         self.assertEqual(len(c['recordings']),24)
         self.assertEqual(len(c['invocations']),72)
+        instrumentation=d['runtime/instrumentation.json']
+        self.assertEqual(instrumentation['hello_timeout_ms'],10_000)
+        for inv in c['invocations']:
+            execution=d[f"invocations/{inv['ordinal']:02}/execution.json"]
+            self.assertEqual(execution['instrumentation_protocol_sha256'],digest(instrumentation))
+            self.assertEqual(fixture.execution_sha256s[inv['ordinal']],digest(execution))
         self.assertEqual(d['runtime/plan.json']['comparison']['min_pairs'],20)
         self.assertFalse(d['runtime/plan.json']['comparison']['held_out'])
         self.assertEqual(d['runtime/plan.json']['comparison']['evidence'],'synthetic')

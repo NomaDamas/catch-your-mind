@@ -263,8 +263,10 @@ def build_runtime_fixture(root, *, count=24, duration_ns=700_000_000,
         comparison_plan_sha256=digest(plan), stream_protocol_sha256=None, allocation_protocol_sha256=None,
         recording_reconciliation_sha256=None, cost_card_sha256=None,
         retention_policy='explicit_external_evaluation_hashes', retain_financial_documents=False, scopes=scopes)
+    # Freeze startup allowance before all dependent hashes: the real child
+    # validates original inputs before HELLO. Playback/task clocks are unchanged.
     i = dict(schema_version=2, kind='recording_instrumentation', scope_protocol_sha256=digest(q),
-             collection_sha256=digest(collection), hello_timeout_ms=1000, close_timeout_ms=1000,
+             collection_sha256=digest(collection), hello_timeout_ms=10_000, close_timeout_ms=1000,
              fd_environment_key='GAMST_RECORDING_FD_V2')
     documents = {'configurations/000.json':provider_config, 'configurations/001.json':prompt, 'responses/000.json':responses,
                  'budgets/000.json':budget}
