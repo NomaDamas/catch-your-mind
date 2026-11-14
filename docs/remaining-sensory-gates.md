@@ -44,7 +44,7 @@ requirements were not satisfied. Synthetic original-byte/HTTP fixtures prove
 software behavior; they do not prove vendor authenticity, account isolation,
 invoice completeness, model quality, whole-system savings or latency improvement.
 
-## Required software paths still missing actual acceptance
+## Implemented paths with remaining model or device acceptance
 
 - **Mapping, family6:** [#186](https://github.com/NomaDamas/Gamst/issues/186),
   child of [#22](https://github.com/NomaDamas/Gamst/issues/22). Depth and optical
@@ -63,15 +63,20 @@ invoice completeness, model quality, whole-system savings or latency improvement
   [#187](https://github.com/NomaDamas/Gamst/issues/187), child of
   [#29](https://github.com/NomaDamas/Gamst/issues/29). The
   [official SAM-Audio repository](https://github.com/facebookresearch/sam-audio)
-  publishes inference code and model/example links. Integrate concrete local
-  inference with bounded audio and prompt provenance; independently verify each
-  prompt mode. Whole-window processing does not establish native causal streaming.
-  Preserve ambient input and validate source separation against clean references.
+  publishes inference code and model/example links. The SDK now provides a
+  [native worker](sam-audio-native.md), [bounded audio windows](sam-audio-windows.md)
+  and [visual-window Context/replay](sam-audio-visual.md). Actual trained
+  separation, each prompt mode, device resources and timing remain unverified
+  under #201/#203/#234. Whole-window processing does not establish native causal
+  streaming. Source separation still requires clean-reference validation.
 - **Tactile contact/slip, family17:**
-  Software acquisition scope: [bounded tactile capture/replay](tactile-capture.md) (#224). It reports input provenance/window readiness only; Sparsh/task-head inference (#225) and actual tactile validation (#226) remain separate requirements.
+  Implemented software includes [bounded tactile capture/replay](tactile-capture.md)
+  (#224), the [native Sparsh graph](sparsh-native.md) (#235), and
+  [capture-bound slip Context/replay](sparsh-context.md) (#236). Actual trained
+  heads, sensor/reference validity and held-out tactile validation remain #226.
   [#188](https://github.com/NomaDamas/Gamst/issues/188), child of
   [#33](https://github.com/NomaDamas/Gamst/issues/33). IMU support does not complete
-  the required DIGIT/GelSight capture plus Sparsh/task-head path. The
+  DIGIT/GelSight capture plus validated Sparsh/task-head inference. The
   [official Sparsh repository](https://github.com/facebookresearch/sparsh) is
   archived/read-only as observed in this audit. Pin the runtime and actual
   task-trained head; representations alone do not measure contact, slip or force.
@@ -86,10 +91,13 @@ invoice completeness, model quality, whole-system savings or latency improvement
   integration. CSI motion/TI track parsing are separate capabilities, not proof
   of occluded human pose/action inference.
 
-Physical concepts remain a separate required gap under
-[#105](https://github.com/NomaDamas/Gamst/issues/105) and family22: calibrated
-track/depth geometry plus an executable physical-concept model path and evidence.
-Image trajectories alone do not establish world motion, contact, force or mass.
+Physical concepts remain a separate acceptance gap under
+[#105](https://github.com/NomaDamas/Gamst/issues/105) and family22. The
+[PG physical Context path](pg-physical-context.md) is implemented, but actual
+canonical model/runtime compatibility, reference parity, resource accounting and
+held-out quality remain #242. Its semantic estimates are not calibrated physical
+measurements. Image trajectories alone do not establish world motion, contact,
+force or mass.
 Existing per-family model/device acceptance issues remain required even where
 software adapters already exist.
 
