@@ -111,10 +111,13 @@ inputs; process isolation is not an OS sandbox. No installer is run by this matr
     execution is narrower than current multi-person/device acceptance
     [#81](https://github.com/NomaDamas/Gamst/issues/81),
     [#87](https://github.com/NomaDamas/Gamst/issues/87).
-12. **MediaPipe hands/gestures — landmarks and geometry implemented;
-    gesture classifier not integrated.** `mediapipe.hand`/`.video`;
-    [hand contract](hand-context.md), `test_hand_context`, `test_landmarker_video`.
-    Code Apache-2.0, task weights separate. Geometry is not gesture classification.
+12. **MediaPipe hands/gestures — geometry and selected gesture classifier implemented.**
+    `mediapipe.hand`/`.video` and separate `mediapipe.gesture.video`;
+    [hand contract](hand-context.md), [gesture contract](gesture-context.md),
+    `test_hand_context`, `test_landmarker_video`, `test_gesture_context`.
+    MediaPipe0.10.35 CPU/NumPy, explicit verified local task bytes;
+    code Apache-2.0, task weights separate. Eight task-label candidates are not
+    intent or commands; real task compatibility/accuracy remains pending.
     [#83](https://github.com/NomaDamas/Gamst/issues/83),
     [#20](https://github.com/NomaDamas/Gamst/issues/20).
 13. **MediaPipe face — implemented IMAGE/VIDEO landmarks and blendshapes.**

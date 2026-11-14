@@ -10,10 +10,12 @@ from ..capabilities import SensorMetadata, identifier
 from .body_context import MediaPipeBodyContext
 from .hand_context import MediaPipeHandContext
 from .face_context import MediaPipeFaceContext
+from .gesture_context import MediaPipeGestureContext
 
 _FORMATTERS = {'body': (MediaPipeBodyContext, 'max_poses'),
                'hand': (MediaPipeHandContext, 'max_hands'),
-               'face': (MediaPipeFaceContext, 'max_faces')}
+               'face': (MediaPipeFaceContext, 'max_faces'),
+               'gesture': (MediaPipeGestureContext, 'max_hands')}
 
 
 class MediaPipeVideoContext:
@@ -36,7 +38,7 @@ class MediaPipeVideoContext:
     @staticmethod
     def capability(kind, sha256, *, max_entities=4, max_gap_ms=1000):
         if type(kind) is not str or kind not in _FORMATTERS:
-            raise ValueError('kind must be body, hand or face')
+            raise ValueError('kind must be body, hand, face or gesture')
         if type(max_gap_ms) is not int or not 1 <= max_gap_ms <= 60000:
             raise ValueError('max_gap_ms must be integer milliseconds in 1..60000')
         formatter, count_key = _FORMATTERS[kind]
@@ -64,6 +66,17 @@ class MediaPipeVideoContext:
             from mediapipe.tasks.python import vision
         except (ImportError, importlib.metadata.PackageNotFoundError) as exc:
             raise RuntimeError('install mediapipe==0.10.35 in the explicitly selected runtime') from exc
+        if kind == 'gesture':
+            from mediapipe.tasks.python.components.processors import classifier_options
+            def factory():
+                return vision.GestureRecognizer.create_from_options(vision.GestureRecognizerOptions(
+                    base_options=python.BaseOptions(model_asset_buffer=payload, delegate=python.BaseOptions.Delegate.CPU),
+                    running_mode=vision.RunningMode.VIDEO, num_hands=max_entities,
+                    min_hand_detection_confidence=.5, min_hand_presence_confidence=.5,
+                    min_tracking_confidence=.5,
+                    canned_gesture_classifier_options=classifier_options.ClassifierOptions(max_results=8, score_threshold=.5),
+                    custom_gesture_classifier_options=classifier_options.ClassifierOptions(max_results=8, score_threshold=.5)))
+            return cls(kind, factory, mp, sha256=sha256, max_entities=max_entities, max_gap_ms=max_gap_ms)
         name, count_key = {'body': ('Pose', 'num_poses'), 'hand': ('Hand', 'num_hands'),
                            'face': ('Face', 'num_faces')}[kind]
         options_type = getattr(vision, name+'LandmarkerOptions')
@@ -78,14 +91,15 @@ class MediaPipeVideoContext:
         return cls(kind, factory, mp, sha256=sha256, max_entities=max_entities, max_gap_ms=max_gap_ms)
 
     def _detect(self, image):
+        method = 'recognize_for_video' if self.kind == 'gesture' else 'detect_for_video'
         if self.detector is None:
             detector = self.factory()
-            if not callable(getattr(detector, 'detect_for_video', None)) or not callable(getattr(detector, 'close', None)):
+            if not callable(getattr(detector, method, None)) or not callable(getattr(detector, 'close', None)):
                 if callable(getattr(detector, 'close', None)): detector.close()
                 raise ValueError('factory must return a fresh VIDEO detector with close')
             self.detector = detector
             self.origin_ts, self.segment_id = self.current_ts, uuid.uuid4().hex
-        return self.detector.detect_for_video(image, self.current_ts-self.origin_ts)
+        return getattr(self.detector, method)(image, self.current_ts-self.origin_ts)
 
     def _reset(self):
         detector, self.detector = self.detector, None
@@ -139,6 +153,8 @@ class MediaPipeVideoContext:
                 result['summary'].update(running_mode='VIDEO', temporal_tracking=True,
                     persistent_track_ids='unavailable', smoothing='runtime_default',
                     state_segment=self.segment_id, native_timestamp_ms=ts-self.origin_ts)
+                if self.kind == 'gesture':
+                    result['summary']['smoothing'] = 'none_by_adapter'
                 result = self.spec.validate(result)
                 self.owner, self.last_sequence, self.last_ts, self.shape = owner, sensor.sequence, ts, shape
                 return result

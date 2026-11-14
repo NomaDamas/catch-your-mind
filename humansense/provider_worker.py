@@ -83,7 +83,7 @@ def _construct(profile, config):
     elif profile == 'l2cs.gaze':
         from .providers.gaze import L2CSGaze
         provider = L2CSGaze.from_local(**config)
-    elif profile in ('mediapipe.body.video', 'mediapipe.hand.video', 'mediapipe.face.video'):
+    elif profile in ('mediapipe.body.video', 'mediapipe.hand.video', 'mediapipe.face.video', 'mediapipe.gesture.video'):
         from .providers.landmarker_video import MediaPipeVideoContext
         provider = MediaPipeVideoContext.from_local(profile.split('.')[1], **config)
     elif profile == 'mediapipe.face':

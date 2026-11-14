@@ -121,7 +121,7 @@ def capability(profile, config):
             raise ValueError('gaze profile requires local gaze/face paths and hashes, optional arch/max_faces')
         return L2CSGaze.capability(config['sha256'],config['face_sha256'],
             arch=config.get('arch','ResNet50'),max_faces=config.get('max_faces',4))
-    if profile in ('mediapipe.body.video', 'mediapipe.hand.video', 'mediapipe.face.video'):
+    if profile in ('mediapipe.body.video', 'mediapipe.hand.video', 'mediapipe.face.video', 'mediapipe.gesture.video'):
         from .providers.landmarker_video import MediaPipeVideoContext
         if set(config)-{'path','sha256','max_entities','max_gap_ms'} or not {'path','sha256'} <= set(config) or type(config['path']) is not str:
             raise ValueError('VIDEO profile requires path, sha256 and optional max_entities/max_gap_ms')
