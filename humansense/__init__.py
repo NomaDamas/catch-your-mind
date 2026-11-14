@@ -45,3 +45,7 @@ __all__ += ['ORBSLAMProcess']
 
 from .fill_conflict import FillConflictRuntime
 __all__ += ['FillConflictRuntime']
+
+from .evaluation_snapshot import (SourceContextView, EvaluationSnapshotPublisher,
+                                 evaluation_snapshot_implementation_sha256)
+__all__ += ['SourceContextView', 'EvaluationSnapshotPublisher', 'evaluation_snapshot_implementation_sha256']
