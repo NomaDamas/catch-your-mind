@@ -107,6 +107,7 @@ def numeric_fixture(root):
     c['runtime_policy_sha256']=digest(u)
     q.update(schema_version=2,collection_sha256=digest(c),stream_protocol_sha256=digest(k),recording_reconciliation_sha256=digest(e))
     i.update(schema_version=3,collection_sha256=digest(c),scope_protocol_sha256=digest(q))
+    docs['runtime/charge-scenarios.json']=dict(schema_version=1,kind='recording_synthetic_charge_scenarios',scenarios=[])
     docs.update({'runtime/accounting.json':k,'runtime/opportunities.json':g,'runtime/exposure.json':e,'runtime/financial-adapters.json':f})
     docs['runtime/source-bundles.json'].update(collection_sha256=digest(c),runtime_policy_sha256=digest(u))
     for n in range(len(c['invocations'])):

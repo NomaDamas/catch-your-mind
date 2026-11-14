@@ -402,11 +402,12 @@ def iter_canonical_inventory(index,*,scope_index=None,binding_index=None):
                     request_decision_sha256=original['request_sha256'],entered_event_sha256=row[9].hex()),
                 provider=binding['provider'],model_revision=binding['model_revision'],role=binding['role'],
                 prompt_sha256=original['prompt_sha256'],evidence_sha256=original['evidence_sha256'],
+                relationship=original['relationship'],predecessor=original['predecessor'],
                 source_chunk=dict(index.chunk_refs[chunk]),source_inventory_locator=dict(
                     recording_id=index.declarations['source_manifest']['recording_id'],
                     source_manifest_sha256=index.declarations['collection']['recordings'][inv['recording_index']]['source_manifest_sha256']),
                 instance=f['instance'],invocation_ordinal=ctx['invocation_ordinal'],scope_index=row[1],
-                binding_index=row[2],entry_ordinal=ei,entry_locator=dict(chunk_ordinal=chunk,event_sequence=row[4],entry_digest=row[9].hex()),
+                binding_index=row[2],entry_ordinal=ei,entered_monotonic_ns=row[5],entry_locator=dict(chunk_ordinal=chunk,event_sequence=row[4],entry_digest=row[9].hex()),
                 outcome=('ok','error','cancelled','timeout')[(index.flags[ei]>>2)&3] if index.flags[ei]&1 else 'outstanding',result_sha256=None if row[8]==b'\0'*32 else row[8].hex(),
                 evidence_refs=original['refs'],declared_settlement_ref=None if not index.flags[ei]&64 else dict(
                     receipt_sha256=index.settlements[ei*64:ei*64+32].hex(),

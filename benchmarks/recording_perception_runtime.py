@@ -47,9 +47,14 @@ class RecordingPerceptionRuntime:
         human.register_capability(self.descriptor);human.register_capability(self.semantic)
         periodic=policy['periodic']
         if periodic is not None:
-            if periodic['scheduler']!='recorded_visual_v1':
-                raise ValueError('Smol sentinel requires its explicit owned process driver; no Visual equivalence')
             self.question=visual_prompt(prompt,periodic['prompt_policy_sha256'])
+            lane=lanes[periodic['lane_id']]
+            self.smol=lane['declaration']['implementation']=='smolvlm_process_v1'
+            if self.smol:
+                from humansense.providers.smolvlm_native import PROMPT
+                if periodic['scheduler']!='smolvlm_sentinel_v1' or self.question!=PROMPT:
+                    raise ValueError('fixed original Smol prompt/sentinel policy required')
+            elif periodic['scheduler']!='recorded_visual_v1':raise ValueError('explicit Visual scheduler required')
         else:self.question=None
         if policy['fill_chain'] is not None and (fill_driver is None or fill_binding_index is None):
             raise ValueError('actual owned FillConflictRuntime and direct binding required')
@@ -78,7 +83,7 @@ class RecordingPerceptionRuntime:
     def _register(self,lane,rid,packet):
         state=next(r for r in lane['controller'].snapshot()['requests'] if r['id']==rid)
         decision=state['decision']['decision_sha256'];client=lane['completion']
-        client.register_capture(decision,packet)
+        if lane['declaration']['implementation']!='smolvlm_process_v1':client.register_capture(decision,packet)
         if self.receipt_router is not None:
             self.receipt_router.register_request(self.owner.context['invocation_ordinal'],lane['binding_index'],rid,decision)
         return decision
@@ -96,13 +101,18 @@ class RecordingPerceptionRuntime:
         rid=decision['request_id'];sha=self._register(lane,rid,packet);operation=None
         try:
             frame=packet_frame(packet,self.sources[packet.source_id][1],self.source_bindings[packet.source_id],subject_id=self.subject_id)
-            response=await lane['adapter'].execute(rid,record,frame,self.question,
+            args=(rid,record,frame) if self.smol else (rid,record,frame,self.question)
+            response=await lane['adapter'].execute(*args,
                 maximum_charge=lane['policy']['maximum_charge'],ttl_ms=lane['policy']['ttl_ms'],
                 evaluation_scope=self.owner.stream_scope(lane['binding_index']))
             entry=lane['completion'].entry_for_decision(sha)
             operation=None if entry is None else self.owner.operation_reference(entry)
             if response.get('accepted') is True:
                 if operation is None:raise RuntimeError('accepted semantic response missing actual entry')
+                if self.smol:
+                    observation=response['observation'];raw=response['observation']['observation']['value']
+                    self._publish(observation,packet,'semantic_description',operation,digest(raw))
+                    return rid,operation.instance_sha256,'selected'
                 interpreted=await self.human.push_observation(self.semantic.id,dict(interpretation=dict(
                     text=response['text'],trust='untrusted_model_interpretation',request_sha256=operation.snapshot()['request_sha256'],
                     prompt_sha256=operation.snapshot()['prompt_sha256'],response_sha256=digest(dict(text=response['text'],usage=response['usage'])),
@@ -115,7 +125,7 @@ class RecordingPerceptionRuntime:
             # publication/export reservation; never fabricate a replacement.
             
             if lane['completion'].entry_for_decision(sha) is not None:lane['completion'].release_entry(sha)
-            lane['completion'].release_capture(sha)
+            if not self.smol:lane['completion'].release_capture(sha)
 
     async def _attempt(self,kind,opportunity,packet,lane,row):
         context=None

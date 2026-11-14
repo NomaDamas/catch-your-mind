@@ -48,7 +48,7 @@ class FillRuntime(unittest.IsolatedAsyncioTestCase):
                 except Exception as error:
                     self.fail(f'{error}: failures={runtime.failures}, perception={runtime.perception.failures}, tasks={runtime.task_runtime.result_values}')
                 cases=list((artifacts.output/'fill').glob('case-*.json'))
-                self.assertEqual(len(cases),1)
+                self.assertEqual(len(cases),1,f"source={runtime.source.counters()} ticks={artifacts._rows['ticks']}")
                 case=json.loads(cases[0].read_bytes());validate_fill_case(case,artifacts.execution_sha256)
                 self.assertEqual(case['outcome'],'resolved_under_rule')
                 self.assertEqual([r['stage'] for r in case['stages']],['initial','reinspection','strong'])

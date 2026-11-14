@@ -23,8 +23,8 @@ _ISSUER=object()
 _BASE=('runtime/source-bundles.json','runtime/policy.json','runtime/latency.json',
        'runtime/assets.json','runtime/plan.json','runtime/collection.json',
        'runtime/scopes.json','runtime/instrumentation.json')
-_NUMERIC=('runtime/accounting.json','runtime/opportunities.json','runtime/exposure.json','runtime/financial-adapters.json')
-_JSON_PATH=re.compile(r'(?:runtime/(?:source-bundles|policy|latency|assets|plan|collection|scopes|instrumentation|accounting|opportunities|exposure|financial-adapters)\.json|recordings/[0-9]{2}/(?:manifest|tasks|profiles)\.json|invocations/[0-9]{2}/execution\.json|(?:configurations|responses|budgets)/[0-9]{3}\.json)')
+_NUMERIC=('runtime/accounting.json','runtime/opportunities.json','runtime/exposure.json','runtime/financial-adapters.json','runtime/charge-scenarios.json')
+_JSON_PATH=re.compile(r'(?:runtime/(?:source-bundles|policy|latency|assets|plan|collection|scopes|instrumentation|accounting|opportunities|exposure|financial-adapters|charge-scenarios)\.json|recordings/[0-9]{2}/(?:manifest|tasks|profiles)\.json|invocations/[0-9]{2}/execution\.json|(?:configurations|responses|budgets)/[0-9]{3}\.json)')
 
 
 def _identity(info):
@@ -78,7 +78,7 @@ def _open_file(root,path):
 def _file_limit(path):
     if path.startswith('configurations/') or path.startswith('budgets/'):return 65536
     if path.startswith('responses/') or path=='runtime/assets.json':return 1024**2
-    if path in ('runtime/source-bundles.json','runtime/financial-adapters.json') or path.endswith('/execution.json'):return 65536
+    if path in ('runtime/source-bundles.json','runtime/financial-adapters.json','runtime/charge-scenarios.json') or path.endswith('/execution.json'):return 65536
     if path in ('runtime/policy.json','runtime/latency.json','runtime/scopes.json','runtime/instrumentation.json'):return 65536
     return MAX_METADATA_BYTES
 
@@ -289,6 +289,11 @@ class OwnedRuntimeInputs:
             expected.update(_NUMERIC)
         elif any(p in docs for p in _NUMERIC):raise ValueError('structural input cannot contain numeric retrofit')
         expected.update(self._metadata_assets(docs,policy))
+        if policy['schema_version']==2:
+            from .recording_runtime_finance import validate_runtime_charge_scenarios
+            validate_runtime_charge_scenarios(docs['runtime/charge-scenarios.json'],runtime_policy=policy,collection=collection,
+                responses=[v for p,v in docs.items() if p.startswith('responses/')],
+                accounting_policy=docs['runtime/accounting.json'],financial_adapter_inventory=docs['runtime/financial-adapters.json'])
         if set(docs)!=expected:raise ValueError('unreferenced or missing metadata input')
         self._recording_index=collection['invocations'][ordinal]['recording_index']
         for n,original in enumerate(collection['recordings']):
@@ -350,7 +355,11 @@ class OwnedRuntimeInputs:
         for arm in policy['arms']:
             for recording in arm['recording_policies']:
                 if recording['periodic'] is not None:
-                    required_prompts.add(recording['periodic']['prompt_policy_sha256'])
+                    prompt_hash=recording['periodic']['prompt_policy_sha256'];required_prompts.add(prompt_hash)
+                    if recording['periodic']['scheduler']=='smolvlm_sentinel_v1':
+                        from humansense.providers.smolvlm_native import PROMPT
+                        if prompt_hash not in prompts or docs[prompts[prompt_hash]]['question']!=PROMPT:
+                            raise ValueError('original fixed Smol prompt policy required before worker startup')
                 for delivery in recording['deliveries']:
                     if delivery['profile']=='acquire_only':continue
                     h=delivery['config_sha256'];required_configs.add(h)

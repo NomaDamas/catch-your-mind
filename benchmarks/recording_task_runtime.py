@@ -266,6 +266,7 @@ class RecordingTaskRuntime:
             except BaseException:
                 if not call.done():call.cancel()
                 await _finish(asyncio.gather(call,return_exceptions=True));raise
+            if result.get('accepted') is True:state['sdk_result']=bounded_json(result,max_bytes=32768)
             if not result.get('accepted'):reason='admission_refused';return
             if self._now()>self._deadline(n):reason='timeout';return
             entry=lane.completion.entry_for_decision(decision_sha)
@@ -323,6 +324,16 @@ class RecordingTaskRuntime:
                 controller_request_id=state['request_id'],request_evidence_sha256=None if state['decision'] is None else state['decision']['evidence']['record_sha256'],
                 prompt_sha256=None if value is None else value['prompt_sha256'],operation_instance=None if value is None else value['entry']['instance_sha256'])
             evidence=await self._write_task(n,'evidence',evidence)
+        sdk_result=state.get('sdk_result')
+        if sdk_result is not None:
+            if entry is None:raise _WriterFailed('actual accepted SDK result missing original native entry')
+            response=dict(schema_version=1,kind='recording_semantic_response',execution_sha256=self.artifacts.execution_sha256,
+                task_id=task['task_id'],input_sha256=task['input_sha256'],scope_index=n+1,
+                operation_instance=entry.snapshot()['entry']['instance_sha256'],
+                native_raw_result_sha256=digest(dict(text=sdk_result['text'],usage=sdk_result['usage'])),sdk_result=sdk_result)
+            try:await self.artifacts.write_request(n,response)
+            except Exception as error:raise _WriterFailed('actual SDK response evidence write failed') from error
+        if reason=='completed' and time.monotonic_ns()>=self._deadline(n):reason='timeout';answer=None;operation=None
         status='answer' if reason=='completed' else 'failed'
         if status=='failed':answer=None;operation=None;self._failures[reason]+=1
         result=dict(schema_version=1,kind='recording_task_result',execution_sha256=self.artifacts.execution_sha256,

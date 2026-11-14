@@ -429,7 +429,9 @@ def validate_runtime_policy(value, *, comparison_plan, latency_policy, source_bu
             for lid in text_ids:
                 if lid not in lanes or lanes[lid]['role'] != 'text_answer': raise ValueError('text-answer lane required')
                 used_lanes.add(lid)
-                lane = lanes[lid]; controller = controllers[lane['controller_id']]
+                lane = lanes[lid]
+                if adapters[lane['adapter_id']]['implementation']=='smolvlm_process_v1':raise ValueError('Smol is a fixed visual perception worker, not a text answer consumer')
+                controller = controllers[lane['controller_id']]
                 answer_identity.append((adapters[lane['adapter_id']], controller['policy'], controller['budget_sha256'],
                                         lane['maximum_charge'], lane['ttl_ms']))
             periodic = policy['periodic']; fill = policy['fill_chain']
@@ -438,6 +440,9 @@ def validate_runtime_policy(value, *, comparison_plan, latency_policy, source_bu
             else:
                 if periodic is None: raise ValueError('A/C require explicit periodic perception')
                 _periodic(periodic, lanes, plan['baseline_sampling'] if arm['arm'] == 'A' else None)
+                is_smol=adapters[lanes[periodic['lane_id']]['adapter_id']]['implementation']=='smolvlm_process_v1'
+                if is_smol!=(periodic['scheduler']=='smolvlm_sentinel_v1'):
+                    raise ValueError('Smol and Visual periodic drivers are distinct explicit profiles')
                 if lanes[periodic['lane_id']]['role'] != 'periodic_small': raise ValueError('periodic-small lane required')
                 used_lanes.add(periodic['lane_id'])
             if arm['arm'] == 'A' and fill is not None: raise ValueError('A cannot trigger conditional fill inference')

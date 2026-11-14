@@ -112,7 +112,7 @@ class TaskRuntime(unittest.IsolatedAsyncioTestCase):
         clock=ReplayClock(d['source_manifest']);owner.bind_mapping(clock.mapping,clock.sha256)
         receipts=[]
         async def ready(task,ref,sha):
-            value=read_ref(artifacts.output,ref);self.assertEqual(digest(value),sha);receipts.append(task)
+            value=read_ref(artifacts.output,ref);self.assertEqual(ref['file_sha256'],sha);receipts.append(task)
         watermarks=[]
         def marks():
             value=[dict(source_index=0,last_acquired_ordinal=None,last_submitted_sequence=None,processed_sequence=None,published_sequence=None,processed_known=False,published_known=False)]
