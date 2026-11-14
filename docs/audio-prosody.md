@@ -19,3 +19,21 @@ Output `features` includes RMS, dBFS (null for exact silence), AC RMS, autocorre
 The default window is 80 ms and the minimum output hop is 20 ms of newly submitted samples. Each process call emits at most one result for the latest full window, so a large block does not reconstruct all intermediate historical feature windows. Delivery cadence remains controlled by the consuming SDK application. Pitch uses normalized FFT autocorrelation with local peak selection; real speech, harmonic ambiguity, reverberation and noise need separate quality evaluation. This does not claim state-of-the-art speech pitch accuracy.
 
 The provider requires NumPy; it is imported on explicit construction. Metadata discovery performs no download or capture. Tests execute actual numerical processing on known tones including range endpoints, silence, DC, seeded noise, clipping, stereo selection, rate changes, gaps and public context integration. These prove signal processing behavior, not real microphone or emotion-model validation. Related open work: #25 and #6.
+
+Version2 also returns bounded `spectral` and `cycles` objects. Spectral features
+use25ms Hann STFT windows with10ms hop, next-power-of-two FFT,40 triangular mel
+power bands and13 orthonormal DCT-II coefficients. Returned values are mean mel
+power, MFCC mean/std and normalized spectral flux, not the full spectrogram.
+Natural log uses a1e-12 floor, with no preemphasis or cepstral liftering; these
+explicit conventions are not interchangeable with another model's frontend.
+Even at96kHz/250ms the window contains at most23 STFT frames.
+
+Cycle estimates require no clipped samples, autocorrelation periodicity>=.9,
+at least5 complete positive-zero-crossing cycles and every period within25% of
+the pitch-derived period. Otherwise HNR, jitter and shimmer are null with a
+specific abstention reason. Local jitter is mean adjacent period difference
+divided by mean period; local shimmer uses cycle peak-to-peak amplitudes in the
+same ratio. HNR is10log10(r/(1-r)) using autocorrelation periodicity, capped at
+approximately60dB to keep finite values. Extra crossings/complex voiced waveforms
+may abstain; these are restricted periodic-signal estimates, not clinical voice
+measurements. Real speech/reference validation remains deferred.

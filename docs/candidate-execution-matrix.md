@@ -258,13 +258,16 @@ inputs; process isolation is not an OS sandbox. No installer is run by this matr
     code/weights unreviewed. [#24](https://github.com/NomaDamas/Gamst/issues/24).
 43. **RMS/dBFS, autocorrelation pitch, silence/voicing — implemented DSP or
     VAD paths.** `audio.prosody` uses NumPy (`audio` extra); [prosody](audio-prosody.md),
-    `test_prosody_provider`, plus Silero above. FFT spectral centroid exists;
-    a general STFT feature output, YIN, HNR, jitter and shimmer are not integrated.
+    `test_prosody_provider`, plus Silero above. Version2 provides bounded STFT/mel
+    summaries and eligible-periodic-window HNR/local jitter/local shimmer with
+    explicit abstention. YIN remains an unintegrated alternative to autocorrelation.
     No weights for DSP; NumPy and SDK licenses separate.
     [#25](https://github.com/NomaDamas/Gamst/issues/25).
-44. **MFCC — implemented inside TalkNet preprocessing, not standalone prosody
-    output.** `test_talknet`; [retained MIT notice](licenses/python-speech-features-MIT.txt).
-    A general feature provider remains unintegrated under
+44. **MFCC — implemented as bounded `audio.prosody` mean/std output and separately
+    inside TalkNet preprocessing.** `test_prosody_provider`, `test_talknet`;
+    [TalkNet retained MIT notice](licenses/python-speech-features-MIT.txt).
+    Frontend conventions differ and are explicit in [prosody](audio-prosody.md).
+    Real audio validation remains under
     [#25](https://github.com/NomaDamas/Gamst/issues/25).
 45. **ASR-derived speaking rate — implemented transcript timing join.**
     [Contract](speaking-rate.md), `test_speaking_rate`; dependency-light SDK code,
