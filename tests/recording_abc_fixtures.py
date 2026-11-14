@@ -10,7 +10,7 @@ from itertools import permutations
 from pathlib import Path
 import sysconfig
 
-from benchmarks.recorded_profiles import FixtureBGR
+from benchmarks.recorded_profiles import FixtureBGR, PCMLevel
 from benchmarks.recording_dependencies import distribution_descriptor, verify_dependencies
 from benchmarks.recording_native_schema import CAPS, digest, encoded
 from benchmarks import recording_transports
@@ -50,7 +50,8 @@ def installed_dependencies():
 
 def build_runtime_fixture(root, *, count=24, duration_ns=700_000_000,
                           tasks_per_recording=1, phase_ns=500_000_000,
-                          fixture_delay_ms=0, dependency_evidence=None):
+                          fixture_delay_ms=0, dependency_evidence=None,
+                          include_audio=False, vision_delay_ms=0):
     """Freeze balanced recording arms and actual files before any execution.
 
     Defaults yield one1Hz tick at500ms and a task snapshot at600ms. A phase0
@@ -69,6 +70,8 @@ def build_runtime_fixture(root, *, count=24, duration_ns=700_000_000,
         raise ValueError('actual phase within recording and one-second period required')
     if type(fixture_delay_ms) is not int or not 0 <= fixture_delay_ms <= 500:
         raise ValueError('bounded explicit synthetic callback delay required')
+    if type(include_audio) is not bool or type(vision_delay_ms) is not int or not 0 <= vision_delay_ms <= 500:
+        raise ValueError('explicit audio selection and bounded vision delay required')
     root = Path(root).absolute()
     if root.is_symlink() or not root.is_dir() or any(root.iterdir()):
         raise ValueError('empty caller-owned existing directory required')
@@ -82,13 +85,14 @@ def build_runtime_fixture(root, *, count=24, duration_ns=700_000_000,
     plan['baseline_sampling']['phase_ms'] = phase_ns // 10**6
     if phase_ns % 10**6:
         raise ValueError('baseline phase must have exact millisecond representation')
-    plan['baseline_sampling']['audio_policy'] = 'No audio source in this declared fixture'
+    plan['baseline_sampling']['audio_policy'] = ('Same PCM level features in all arms' if include_audio
+                                                else 'No audio source in this declared fixture')
     u['recordings'] = []
     for arm in u['arms']:
         arm['recording_policies'] = []
     question = 'Describe the observed synthetic pixels; do not infer model accuracy.'
     prompt = dict(schema_version=1, kind='recording_visual_prompt', question=question)
-    provider_config = dict(delay_ms=0)
+    provider_config = dict(delay_ms=vision_delay_ms)
     budget = dict(unit='fixture', pricing_revision='1', ceiling=10000,
                   max_calls=256, max_inflight=4, receipt_limit=128)
     bundles = {}; crows = []; payloads = {}
@@ -111,6 +115,21 @@ def build_runtime_fixture(root, *, count=24, duration_ns=700_000_000,
                 capture_ns=manifest['origin_capture_ns']+offset, offset_ns=offset,
                 format='bgr8_hwc', stream_epoch='old', payload_path=path,
                 payload_bytes=len(data), payload_sha256=hashlib.sha256(data).hexdigest(), shape=[32,32,3]))
+        if include_audio:
+            manifest['sources'].append(dict(source_id='mic',sensor_id='microphone',stream_epoch='old',
+                format='pcm_s16le_mono',modality='audio',calibration_id=None))
+            manifest['availability'].append(dict(source_id='mic',intervals=[dict(
+                start_ns=0,end_ns=duration_ns,state='available')]))
+            # Complete 50ms windows only; never stretch the last PCM packet.
+            for j,offset in enumerate(range(0,duration_ns-50_000_000+1,50_000_000)):
+                data=(100+n+j).to_bytes(2,'little',signed=True)*800
+                path=f'audio-{j}.bin';payloads[f'recordings/{n:02}/payload/{path}']=data
+                manifest['records'].append(dict(source_id='mic',sensor_id='microphone',sequence=j+1,
+                    capture_ns=manifest['origin_capture_ns']+offset,offset_ns=offset,
+                    format='pcm_s16le_mono',stream_epoch='old',payload_path=path,
+                    payload_bytes=len(data),payload_sha256=hashlib.sha256(data).hexdigest(),
+                    sample_rate=16000,sample_count=800))
+            manifest['records'].sort(key=lambda r:(r['offset_ns'],r['source_id'],r['sequence']))
         tasks = []
         for k in range(tasks_per_recording):
             tid = f'{n}-{k}'; task_input = dict(question=question)
@@ -126,6 +145,9 @@ def build_runtime_fixture(root, *, count=24, duration_ns=700_000_000,
             policy['recording_id'] = rid
             delivery = policy['deliveries'][0]
             delivery['config_sha256'] = None if name == 'A' else digest(provider_config)
+            if include_audio:
+                policy['deliveries'].append(dict(source_id='mic',profile='pcm_level',
+                    config_sha256=digest({}),binding_id='audio'))
             if policy['periodic'] is not None:
                 policy['periodic'].update(phase_ns=phase_ns, prompt_policy_sha256=digest(prompt))
             arm['recording_policies'].append(policy)
@@ -138,6 +160,8 @@ def build_runtime_fixture(root, *, count=24, duration_ns=700_000_000,
         declaration = deepcopy(policy_fixture()[0]['recordings'][0])
         declaration.update(recording_id=rid, source_manifest_sha256=digest(manifest),
                            tasks_sha256=digest(tasks), profiles_sha256=digest(profiles))
+        if include_audio:
+            declaration['source_bindings'].append(dict(source_id='mic',coordinate_frame=None,channels=None))
         u['recordings'].append(declaration)
         crows.append(dict(recording_id=rid, source_manifest_sha256=digest(manifest),
             tasks_sha256=digest(tasks), profiles_sha256=digest(profiles),
@@ -166,19 +190,25 @@ def build_runtime_fixture(root, *, count=24, duration_ns=700_000_000,
     u['latency_policy_sha256'] = digest(latency)
     collection = dict(schema_version=2, kind='recording_collection', comparison_plan_sha256=digest(plan),
         runtime_policy_sha256=digest(u), recordings=crows, arms=[], invocations=invocations,
-        capacity=dict(CAPS, max_entries_per_run=64, max_events_per_run=512, max_chunks_per_run=8))
-    spec = FixtureBGR.capability(0)
+        capacity=dict(CAPS, max_entries_per_run=128 if include_audio else 64,
+                      max_events_per_run=2048 if include_audio else 512,
+                      max_chunks_per_run=16 if include_audio else 8))
+    spec = FixtureBGR.capability(vision_delay_ms)
     for arm in u['arms']:
         bindings = []
         for ordinal, lane in enumerate(arm['lanes']):
             bindings.append(dict(binding_id=lane['binding_id'], provider=adapter['provider'],
                 model_revision=adapter['model_revision'], role='text_llm' if lane['role']=='text_answer' else 'small_vlm',
-                config_sha256=digest(adapter['config']), source_ids=['camera'],
+                config_sha256=digest(adapter['config']), source_ids=['camera','mic'] if include_audio else ['camera'],
                 entry_boundary='async_client_callback', operation_kinds=['semantic'], semantic_lane=ordinal))
         if arm['arm'] != 'A':
             bindings.append(dict(binding_id='vision', provider=spec.provider,
                 model_revision=spec.version, role='signal', config_sha256=digest(provider_config),
                 source_ids=['camera'], entry_boundary='in_process_backend', operation_kinds=['process'], semantic_lane=None))
+        if include_audio:
+            bindings.append(dict(binding_id='audio',provider=PCMLevel.spec.provider,
+                model_revision=PCMLevel.spec.version,role='signal',config_sha256=digest({}),
+                source_ids=['mic'],entry_boundary='in_process_backend',operation_kinds=['process'],semantic_lane=None))
         collection['arms'].append(dict(arm=arm['arm'], config_sha256=digest(plan['systems'][arm['arm']]),
                                        provider_bindings=bindings))
     scopes = []
@@ -197,6 +227,7 @@ def build_runtime_fixture(root, *, count=24, duration_ns=700_000_000,
              fd_environment_key='GAMST_RECORDING_FD_V2')
     documents = {'configurations/000.json':provider_config, 'configurations/001.json':prompt, 'responses/000.json':responses,
                  'budgets/000.json':budget}
+    if include_audio:documents['configurations/002.json']={}
     def ref(path, value):
         data = encoded(value)+b'\n'
         return dict(path=path, file_sha256=hashlib.sha256(data).hexdigest(), bytes=len(data))
@@ -208,6 +239,10 @@ def build_runtime_fixture(root, *, count=24, duration_ns=700_000_000,
         r = ref(path, documents[path])
         assets['assets'].append(dict(asset_id=aid, kind=kind, path=path,
                                     sha256=r['file_sha256'], bytes=r['bytes']))
+    if include_audio:
+        r=ref('configurations/002.json',{})
+        assets['assets'].append(dict(asset_id='audio-config',kind='provider_config',path=r['path'],
+                                    sha256=r['file_sha256'],bytes=r['bytes']))
     documents.update({'runtime/'+name+'.json':value for name,value in dict(policy=u, plan=plan,
         latency=latency, collection=collection, scopes=q, instrumentation=i, assets=assets).items()})
     index = dict(schema_version=1, kind='recording_runtime_input_sources', collection_sha256=digest(collection),

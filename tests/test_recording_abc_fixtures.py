@@ -108,3 +108,60 @@ class ActualInputs(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):build_runtime_fixture(root,dependency_evidence=self.dependencies)
         self.assertEqual(marker.read_bytes(),b'original')
         with self.assertRaises(ValueError):build_runtime_fixture(root,count=1,dependency_evidence=self.dependencies)
+
+    async def test_actual_pcm_context_continues_while_vision_is_pending(self):
+        from humansense import HumanSense,SensorStreams
+        from benchmarks.recording_capture_router import RecordingCaptureRouter
+        from benchmarks.recording_runtime_profiles import builtin_profile
+        from benchmarks.recording_evaluation import RecordingEvaluationSession
+        from benchmarks.recording_native_writer import RecordingNativeWriter
+        from benchmarks.recording_native_schema import run_context
+        fixture=self.build(count=20,duration_ns=300_000_000,phase_ns=0,
+                           include_audio=True,vision_delay_ms=500)
+        d=fixture.declarations();u=d['runtime_policy'];arm=u['arms'][1]
+        expected=preflight_runtime_collection([fixture.declarations(n) for n in range(20)],
+            latency_policy=fixture.documents['runtime/latency.json'],source_bundles=fixture.source_bundles)
+        self.assertLess(expected['predicted_artifact_bytes'],4*1024**3)
+        output=tempfile.TemporaryDirectory(dir='.');self.addCleanup(output.cleanup)
+        context=run_context(d,'a'*64,1)
+        writer=await RecordingNativeWriter.open(Path(output.name).resolve()/'native',context)
+        owner=RecordingEvaluationSession.from_runtime_frozen(d,writer,
+            latency_policy=fixture.documents['runtime/latency.json'],source_bundles=fixture.source_bundles,
+            run_nonce='a'*64,execution_ordinal=1,retain_evaluation_hashes=True)
+        human=HumanSense(consent=True);streams=SensorStreams(human);source=None;router=None
+        try:
+            bindings=d['collection']['arms'][1]['provider_bindings']
+            for delivery in arm['recording_policies'][0]['deliveries']:
+                config={'delay_ms':500} if delivery['source_id']=='camera' else {}
+                spec,factory,config=builtin_profile(delivery,config)
+                streams.register(spec,factory)
+                bi=next(i for i,b in enumerate(bindings) if b['binding_id']==delivery['binding_id'])
+                sensor=next(s for s in d['source_manifest']['sources'] if s['source_id']==delivery['source_id'])
+                await streams.open(sensor['source_id'],sensor['sensor_id'],[spec.id],
+                    evaluation_bindings={spec.id:owner.stream_scope(bi)},evaluation_configurations={spec.id:config})
+            router=RecordingCaptureRouter(d['source_manifest'],streams=streams,
+                source_bindings=u['recordings'][0]['source_bindings'],subject_id='local-user',
+                delivery_sources=['camera','mic'])
+            async with await OwnedRuntimeInputs.open(str(fixture.root),
+                    expected_execution_sha256=fixture.execution_sha256s[1],invocation_ordinal=1) as owned:
+                fd=owned.duplicate_payload_root('original-0')
+                try:source=await OwnedCaptureSource.preflight(d['source_manifest'],fd,
+                    CaptureCapacity(4*(32*32*3+1600),1_000_000_000),journal=capture_fixtures.Journal())
+                finally:os.close(fd)
+                clock=ReplayClock(d['source_manifest']);owner.bind_mapping(clock.mapping,clock.sha256)
+                await source.start(clock,router)
+                current=await human.get_context()
+                names={o['capability']['id'] for o in current['observations'].values()}
+                self.assertIn('audio.replay.level',names)
+                self.assertNotIn('vision.replay.fixture',names)
+                counters={r['source_id']:r for r in source.counters()}
+                self.assertEqual(counters['mic']['captured'],6)
+                self.assertEqual(counters['camera']['captured'],3)
+                self.assertTrue(all(r['uninspected_suffix']==0 for r in counters.values()))
+                await router.close();await streams.drain()
+                current=await human.get_context()
+                self.assertIn('vision.replay.fixture',{o['capability']['id'] for o in current['observations'].values()})
+        finally:
+            if source is not None:await source.close()
+            if router is not None:await router.close()
+            await human.close();await owner.close()
