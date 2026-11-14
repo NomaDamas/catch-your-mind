@@ -86,3 +86,29 @@ Validation includes actual HumanSense accepted records, an actual native4
 callback joined to an accepted record, immutable artifact aliases and mutations,
 queue pressure, exclusive paths/FIFO/symlink rejection, write failure and repeated
 cancellation, and a real fixture subprocess using the fixed channel handshake.
+
+The fixed parent is `python -m benchmarks.recording_coordinator --runtime-inputs
+ABSROOT --output NEWROOT --expected-execution-sha256 ORIGINAL_INVOCATION_ZERO_SHA
+--retain-evaluation-artifacts`. Financial retention additionally requires the
+original U2/Q2 consent and `--retain-financial-documents`. Actual evaluations and
+dataset acquisition remain GCP-only; synthetic local fixtures establish software
+behavior only. No commands, modules, models, or downloads are selected by input.
+
+The parent preflights every original recording and all joint source/native/runtime
+copy bounds before creating output. Each invocation owns one fixed child, two
+bounded channels, stdout/stderr draining, and cancellation-resistant group reap.
+A task receipt is stamped only after its original result, evidence, snapshot,
+envelope and record bytes are validated. Final native/source/publication joins
+run before the collection can be structurally complete. Failure latency keeps
+the original task floor and later observed failure. Child exit zero alone is
+insufficient evidence.
+
+Child files remain under `.staging/NN`; byte-identical imports are published under
+`runs/NN`. The parent alone writes `native-inventory.json`, `handshake.json`, task
+receipts, channel rows and `run-inventory.json`. Native inventory is the actual
+parent-issued channel/reap snapshot, including null terminal on failed prefixes.
+Source and native schemas are unchanged. Both retained copies consume the
+collection budget. The exclusive final execution inventory includes actual
+retained byte counts, remains immutable with `assessments: []`, and does not
+claim numeric or actual acceptance. Subsequent assessments belong to separate
+artifacts.
