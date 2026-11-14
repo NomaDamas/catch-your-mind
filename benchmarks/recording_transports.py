@@ -389,7 +389,7 @@ class _Completion(BoundCompletion):
 
     async def _close(self):
         if self._prepared is not None: await self._prepared.release()
-        self._captures.clear(); self._entries.clear()
+        self._captures.clear(); self._entries.clear(); self._instances.clear(); self._prompts.clear()
 
 
 class _Prepared(PreparedCall):
@@ -400,16 +400,17 @@ class _Prepared(PreparedCall):
         if self._released or self._task is not None or self.owner._closed:
             raise RuntimeError('prepared completion is single-use')
         value, ordinal, capture = self.owner._binding(binding, self._raw)
-        self._task = asyncio.create_task(self.owner._invoke(self._raw, binding, value, ordinal, capture))
-        try: return await asyncio.shield(self._task)
+        task = asyncio.create_task(self.owner._invoke(self._raw, binding, value, ordinal, capture))
+        self._task = task
+        try: return await asyncio.shield(task)
         except asyncio.CancelledError:
-            self._task.cancel(); await _finish(asyncio.gather(self._task, return_exceptions=True)); raise
+            task.cancel(); await _finish(asyncio.gather(task, return_exceptions=True)); raise
 
     async def release(self):
         if self._task is not None and not self._task.done():
             if asyncio.current_task() is self._task: raise RuntimeError('prepared call cannot join itself')
             self._task.cancel(); await _finish(asyncio.gather(self._task, return_exceptions=True))
-        self._released = True; self._raw = None
+        self._released = True; self._raw = None; self._task = None
         if self.owner._prepared is self: self.owner._prepared = None
 
 

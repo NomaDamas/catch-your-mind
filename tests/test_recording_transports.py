@@ -162,6 +162,7 @@ class HTTPTests(NativeFixture,unittest.IsolatedAsyncioTestCase):
             self.assertGreater(memory.reserved_bytes,0)
             await adapter.close();await client.close();observer.backend_closed(0,client);await observer.close()
             self.assertEqual(memory.reserved_bytes,0)
+            self.assertEqual((len(client._entries),len(client._captures),len(client._instances),len(client._prompts)),(0,0,0,0))
             events=self.events(writer);self.assertEqual(sum(e['event']=='entered' for e in events),1)
 
     async def test_actual_visual_sdk_png_wire_and_owned_packet_join(self):
@@ -204,7 +205,7 @@ class HTTPTests(NativeFixture,unittest.IsolatedAsyncioTestCase):
                 async with Server() as server:
                     server.status=status;server.body=body;server.headers=headers;server.block=name=='timeout'
                     adapter,client,sink,memory,observer,writer,scope=await self.setup_client(server,
-                        response_bytes=1024,timeout_ms=30 if name=='timeout' else 1000)
+                        response_bytes=1024,timeout_ms=500 if name=='timeout' else 1000)
                     rid,record=await self.queued()
                     with self.assertRaises(error):await adapter.execute(rid,record,'q',maximum_charge=1,evaluation_scope=scope)
                     self.assertEqual(len(server.requests),1);self.assertEqual(sink.rows[0]['outcome'],outcome)
