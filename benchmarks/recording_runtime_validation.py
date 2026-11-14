@@ -158,6 +158,48 @@ def _capture(ref,manifest,mapping,acquired,acquired_ns,*,before=None):
     return ri
 
 
+def _operation_captures(op,publications):
+    direct=[r for r in op['evidence_refs'] if r['kind']=='capture']
+    if direct or op['role'] not in ('small_vlm','strong_vlm','text_llm'):return direct
+    # SDK semantic calls bind the complete accepted observation's hash, not a
+    # duplicated capture ref. Follow that original record into its publication.
+    matches=[p for p in publications.values() if p['record_sha256']==op['evidence_sha256'] and p['published_monotonic_ns']<=op['entered_monotonic_ns']]
+    if len(matches)!=1:raise ValueError('semantic entry has no unique prior accepted original source record')
+    allowed={'text_llm':('task_snapshot',),'small_vlm':('raw_capture_descriptor','fill_descriptor'),'strong_vlm':('fill_descriptor',)}
+    if matches[0]['role'] not in allowed[op['role']]:raise ValueError('semantic entry consumes an unsupported source descriptor role')
+    return matches[0]['capture_refs']
+
+
+def _publication_source(row,record,d,execution,mapping,source_mappings):
+    recording=next(r for r in d['runtime_policy']['recordings'] if r['recording_id']==d['source_manifest']['recording_id'])
+    if record.get('subject_id')!=recording['subject_id']:raise ValueError('accepted publication changed frozen subject')
+    capability=record['observation'].get('capability',{}).get('id')
+    fixed={'raw_capture_descriptor':'evaluation.original_visual.v1','task_snapshot':CAPABILITY_ID,
+        'fill_descriptor':'vision.fill_inspection_input','fill_comparison':'vision.fill_comparison'}
+    if row['role'] in fixed and capability!=fixed[row['role']]:raise ValueError('publication role differs from actual SDK capability')
+    if row['role']=='task_snapshot':
+        if row['capture_refs']:raise ValueError('Context envelope is not a direct sensor capture')
+        return
+    if len(row['capture_refs'])!=1:raise ValueError('initial recorded provider output requires one exact original capture')
+    ref=row['capture_refs'][0];source=d['source_manifest']['sources'][ref['source_index']];capture=d['source_manifest']['records'][ref['capture_ordinal']]
+    sensor=record['observation'].get('sensor',{});binding=next(b for b in recording['source_bindings'] if b['source_id']==source['source_id'])
+    if (record['timestamp_ms']!=mapping['sdk_anchor_ms']+capture['offset_ns']//1_000_000 or
+            any(sensor.get(k)!=source[k] for k in ('source_id','sensor_id','calibration_id')) or
+            sensor.get('sequence')!=capture['sequence'] or sensor.get('capture_sequence')!=capture['sequence'] or
+            sensor.get('coordinate_frame')!=binding['coordinate_frame'] or sensor.get('channels')!=([] if binding['channels'] is None else binding['channels'])):
+        raise ValueError('accepted publication changed original capture time/sensor/coordinates')
+    expected_epoch=source['stream_epoch']
+    if row['role']=='specialist_result':
+        epochs=[e['stream_epoch'] for e in source_mappings[ref['source_index']]['provider_epochs'] if e['capability_id']==capability]
+        if len(epochs)!=1:raise ValueError('specialist publication has no frozen original provider epoch')
+        expected_epoch=epochs[0]
+    if sensor.get('stream_epoch')!=expected_epoch:raise ValueError('accepted publication changed original delivery/capture epoch')
+    if row['role']=='raw_capture_descriptor':
+        expected=dict(source_manifest_sha256=digest(d['source_manifest']),record_sha256=digest(capture),record_ordinal=ref['capture_ordinal'],
+            payload_sha256=capture['payload_sha256'],original_capture_ns=capture['capture_ns'],mapping_sha256=digest(mapping))
+        if record['observation']['value']!={'capture':expected}:raise ValueError('visual descriptor changed original captured image identity')
+
+
 def _source(directory,capture,manifest,mapping,max_lateness):
     validate_metadata('capture-inventory',capture,capture['execution_sha256'])
     if capture['source_manifest_sha256']!=digest(manifest) or capture['mapping_sha256']!=digest(mapping):
@@ -250,7 +292,9 @@ def _source_files(directory,terminal,d,execution,mapping,mappings,events):
         if path not in files or _json(directory,files[path],maximum=64*1024**2,original=True)!=value:
             raise ValueError('source original declaration/mapping changed')
     ref=files.get('mapping-records.json')
-    if ref is None:raise ValueError('registered original mapping record inventory required')
+    if ref is None:
+        if terminal['state']=='failed':return files,[]
+        raise ValueError('registered original mapping record inventory required')
     records=_json(directory,ref,maximum=65536,original=True)
     if type(records) is not list or len(records)!=len(mappings) or len(events)!=len(records):
         raise ValueError('complete registered source mapping inventory required')
@@ -371,7 +415,7 @@ def _runtime_outcomes(directory,summary,d,execution,mapping,flags,times,operatio
                 selected['last']=ri
         if row['operation_instance'] is not None:
             op=operations.get(row['operation_instance'])
-            if op is None or op['scope_index']!=0 or row['capture_ref'] not in op['evidence_refs']:raise ValueError('tick has no actual stream-owned native capture entry')
+            if op is None or op['scope_index']!=0 or row['capture_ref'] not in _operation_captures(op,publications):raise ValueError('tick has no actual stream-owned native capture entry')
         if row['case'] is not None:
             _fill_join(directory,row,d,execution,operations,publications,selected['definition'])
     if summary['state']=='closed' and any(v['next']!=v['schedule'].opportunity_count for v in schedules.values()):
@@ -383,19 +427,27 @@ def _fill_join(directory,tick,d,execution,operations,publications,definition):
     if (case['capture_ref']!=tick['capture_ref'] or case['source_manifest_sha256']!=digest(d['source_manifest']) or
             case['mapping_sha256']!=tick['capture_ref']['mapping_sha256'] or case['configuration_sha256']!=definition['fill_config_sha256'] or case['rule_sha256']!=definition['rule_sha256']):
         raise ValueError('conditional fill case changed original capture/configuration/rule')
+    descriptor=None
     for name,role in (('measurement_publication','fill_measurement'),('descriptor_publication','fill_descriptor'),('comparison_publication','fill_comparison')):
         ref=case[name]
         if ref is None:continue
         row,record=read_publication(directory,ref,execution_sha256=digest(execution))
         if row!=publications.get(record['id']) or row['role']!=role or row['capture_refs']!=[case['capture_ref']]:
             raise ValueError('conditional fill case lacks actual original publication')
+        if role=='fill_descriptor':descriptor=record
+    original=d['source_manifest']['records'][case['capture_ref']['capture_ordinal']]
+    descriptor_capture=descriptor['observation']['value']['capture']
+    if (descriptor_capture['source_sha256']!=case['image_sha256'] or descriptor_capture['shape']!=original['shape'] or
+            descriptor_capture['config_sha256']!=case['configuration_sha256']):
+        raise ValueError('conditional fill descriptor changed actual image/shape/configuration')
     for stage in case['stages']:
         if stage['operation_instance'] is None:continue
         op=operations.get(stage['operation_instance'])
         if (op is None or op['binding_index']!=stage['binding_index'] or op['scope_index']!=0 or
                 op['prompt_sha256']!=stage['prompt_sha256'] or stage['raw_response_sha256'] is not None and op['result_sha256']!=stage['raw_response_sha256'] or
-                op['role']!=('strong_vlm' if stage['stage']=='strong' else 'small_vlm') or case['capture_ref'] not in op['evidence_refs'] or
-                op['relationship']!={'initial':'root','reinspection':'retry','strong':'escalation'}[stage['stage']] or op['predecessor']!=stage['predecessor_instance']):
+                op['role']!=('strong_vlm' if stage['stage']=='strong' else 'small_vlm') or case['capture_ref'] not in _operation_captures(op,publications) or
+                op['relationship']!={'initial':'root','reinspection':'retry','strong':'escalation'}[stage['stage']] or op['predecessor']!=stage['predecessor_instance'] or
+                op['evidence_sha256']!=digest(descriptor)):
             raise ValueError('conditional fill stage has no original actual small/strong entry')
 
 
@@ -490,7 +542,7 @@ def _native(directory,d,documents,bundles,numeric,parent,run,violations,budget):
     return index,operations,sorted(work,key=lambda r:(r['work_ordinal'],r['worker_ordinal'])),counts
 
 
-def _task_join(directory,summary,tasks,receipts,execution,manifest,mapping,operations,publications,clock_known,mapping_records,require_native=True):
+def _task_join(directory,summary,tasks,receipts,execution,manifest,mapping,operations,publications,clock_known,mapping_records,require_native=True,source_known=True):
     results={};rows=[];receipt_values=[];used_operations=set()
     if summary is not None:
         for ref in summary['task_results']:
@@ -514,6 +566,11 @@ def _task_join(directory,summary,tasks,receipts,execution,manifest,mapping,opera
             raise ValueError('parent receipt changed original task ordinal/input')
         result_ref,result=results.get(tid,(None,None));evidence_ref=None
         if receipt['result_sha256'] is not None:
+            if result is None:
+                # The parent may have validated an answer immediately before
+                # the child crashed, without a final child-summary frame.
+                result_ref=_fixed(directory,'tasks/task-%04d-result.json'%n)
+                result=read_ref(directory,result_ref);validate_task_artifact('result',result,execution)
             if result is None or result_ref['file_sha256']!=receipt['result_sha256']:raise ValueError('parent receipt changed original child result')
         if result is not None:
             if result_ref['path']!='tasks/task-%04d-result.json'%n or result['scope_index']!=n+1 or result['input_sha256']!=task['input_sha256']:
@@ -542,10 +599,10 @@ def _task_join(directory,summary,tasks,receipts,execution,manifest,mapping,opera
                     raise ValueError('snapshot record cannot republish changed or retimed Context')
                 if record.get('observation',{}).get('capability',{}).get('id')!=CAPABILITY_ID:
                     raise ValueError('actual SDK snapshot capability required')
-                _context_records(directory,context,publications,mapping_records,evidence['snapshot_observed_end_ns'])
+                if source_known:_context_records(directory,context,publications,mapping_records,evidence['snapshot_observed_end_ns'])
                 if evidence['context_object_sha256']!=digest(context) or evidence['snapshot_record_sha256']!=_digest(record):raise ValueError('original task Context/record digest differs')
                 pub=publications.get(record.get('id'))
-                if pub is None or pub['record_sha256']!=_digest(record) or pub['role']!='task_snapshot':raise ValueError('snapshot missing actual accepted publication')
+                if source_known and (pub is None or pub['record_sha256']!=_digest(record) or pub['role']!='task_snapshot'):raise ValueError('snapshot missing actual accepted publication')
                 if not anchor+task['snapshot_ns']<=evidence['snapshot_observed_begin_ns']<=evidence['snapshot_observed_end_ns']:
                     raise ValueError('snapshot observed before original frozen schedule')
                 op=operations.get(evidence['operation_instance'])
@@ -643,7 +700,7 @@ def validate_recording_run(directory,*,documents,source_bundles,invocation_ordin
             if mapping['monotonic_anchor_ns']!=handshake['anchor_monotonic_ns']:raise ValueError('replay anchor differs from actual parent START handshake')
         if summary['capture_inventory'] is not None:
             capture=read_ref(directory,summary['capture_inventory'])
-            if run['source_inventory']!=summary['capture_inventory'] or mapping is None:raise ValueError('parent/source child inventory mismatch')
+            if run['source_inventory']!=capture['source_terminal'] or mapping is None:raise ValueError('parent/source child inventory mismatch')
             max_lateness=50_000_000 if numeric is None else numeric['exposure_policy']['source_policy']['max_acquisition_lateness_ns']
             flags,times,terminal,coverage,source_complete,source_finished,cleanup_finished,mapping_events,settlement_events=_source(directory,capture,d['source_manifest'],mapping,max_lateness)
             source_mappings=read_ref(directory,capture['source_mappings']);validate_metadata('source-mappings',source_mappings,execution_sha)
@@ -653,6 +710,15 @@ def validate_recording_run(directory,*,documents,source_bundles,invocation_ordin
                     raise ValueError('source epoch/clock bridge changed original source')
             source_files,mapping_records=_source_files(directory,terminal,d,execution,mapping,source_mappings,mapping_events)
         clock_known=clock_known and summary['clock_state']=='consistent'
+    elif handshake['anchor_monotonic_ns'] is not None:
+        # A child can die after a validated PLAYBACK/answer prefix. Keep that
+        # original mapping and task receipt; no terminal/source closure follows.
+        mapping=read_ref(directory,_fixed(directory,'mapping.json'))
+        validate_metadata('mapping',mapping,execution_sha)
+        m=d['source_manifest']
+        if (mapping['source_manifest_sha256']!=digest(m) or any(mapping[k]!=m[k] for k in ('recording_id','origin_capture_ns','duration_ns')) or
+                mapping['monotonic_anchor_ns']!=handshake['anchor_monotonic_ns']):
+            raise ValueError('failed original mapping prefix differs from actual START handshake')
     if not clock_known:violations.add('clock_discontinuity')
     index,operations,work,counts=_native(directory,d,documents,source_bundles,numeric,parent,execution,violations,budget)
     if index is None:source_complete=False;coverage['source_comparable']=False
@@ -663,7 +729,7 @@ def validate_recording_run(directory,*,documents,source_bundles,invocation_ordin
         for ref in op['evidence_refs']:
             if ref['kind']=='capture':
                 if mapping is None:raise ValueError('native capture requires original replay mapping')
-                _capture(ref,d['source_manifest'],mapping,flags,times,before=op['entered_monotonic_ns'])
+                if capture is not None:_capture(ref,d['source_manifest'],mapping,flags,times,before=op['entered_monotonic_ns'])
     publications={};ordinal=0
     if summary is not None:
         for ref in _outcomes(directory,summary['publication_inventory'],execution_sha,'publications',violations):
@@ -672,23 +738,25 @@ def validate_recording_run(directory,*,documents,source_bundles,invocation_ordin
             if row['publication_ordinal']!=ordinal or row['record_id'] in publications:raise ValueError('publication original ordinal/record duplicated')
             ordinal+=1
             if row['source_mapping_sha256']!=digest(mapping):raise ValueError('accepted record changed original source mapping')
-            for cap in row['capture_refs']:_capture(cap,d['source_manifest'],mapping,flags,times,before=row['published_monotonic_ns'])
+            if capture is not None:
+                for cap in row['capture_refs']:_capture(cap,d['source_manifest'],mapping,flags,times,before=row['published_monotonic_ns'])
+            if mapping is not None and source_mappings:_publication_source(row,record,d,execution,mapping,source_mappings)
             if row['operation_instance'] is not None:
                 op=operations.get(row['operation_instance'])
                 if index is not None and (op is None or op['binding_index']!=row['binding_index'] or op['outcome']!='ok' or
                         row['origin_result_sha256'] is not None and op['result_sha256']!=row['origin_result_sha256']):
                     raise ValueError('accepted publication differs from actual native result/owner')
-                if index is not None and sorted(row['capture_refs'],key=digest)!=sorted((r for r in op['evidence_refs'] if r['kind']=='capture'),key=digest):
+                if index is not None and sorted(row['capture_refs'],key=digest)!=sorted(_operation_captures(op,publications),key=digest):
                     raise ValueError('publication capture provenance differs from actual operation')
             publications[row['record_id']]=row
-    if index is not None:
+    if index is not None and capture is not None:
         _runtime_outcomes(directory,summary,d,execution,mapping,flags,times,operations,publications,counts,violations)
     elif summary is not None:
         # A failed native prefix is not an empty operation inventory. Preserve
         # the original indexes but do not certify their asserted counters.
         for kind,name in (('adapters','adapter_outcomes'),('deliveries','delivery_outcomes'),('ticks','tick_inventory'),('mapping-updates','mapping_updates')):
             for _ in _outcomes(directory,summary[name],execution_sha,kind,violations):pass
-    receipts,task_rows=_task_join(directory,summary,d['tasks'],run['receipts'],execution_sha,d['source_manifest'],mapping,operations,publications,clock_known,mapping_records,index is not None)
+    receipts,task_rows=_task_join(directory,summary,d['tasks'],run['receipts'],execution_sha,d['source_manifest'],mapping,operations,publications,clock_known,mapping_records,index is not None,capture is not None)
     controller_settlements=_settlements(directory,terminal,source_files,settlement_events,documents,execution,operations,index)
     channel_keys=set()
     for row in _outcomes(directory,run['channel_outcomes'],execution_sha,'channels',violations):
