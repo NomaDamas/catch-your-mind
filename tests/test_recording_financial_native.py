@@ -64,6 +64,7 @@ class ActualFinance(NativeFixture,unittest.IsolatedAsyncioTestCase):
             key=lambda row:(row['work_ordinal'],row['worker_ordinal']))
         source_sha=observer.declarations['collection']['recordings'][0]['source_manifest_sha256']
         view=runview(execution_sha256='1'*64,source_manifest_sha256=source_sha,worker_inventory_sha256=digest(works),
+            controller_settlement_inventory_sha256=digest(sorted(recorder.receipts(),key=lambda row:row['instance'])),
             native_terminal_sha256=hashlib.sha256((writer.output/'terminal.json').read_bytes()).hexdigest())
         context={key:index.terminal['context'][key] for key in ('collection_sha256','scope_protocol_sha256','instrumentation_protocol_sha256')}
         operations,work,keys=_native_inventory([index],[view],context)

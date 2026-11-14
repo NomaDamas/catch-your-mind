@@ -190,14 +190,14 @@ class RecordingSettlementRecorder:
             if len(self._registered) >= self._maximum: raise ValueError('recording request lookup capacity exhausted')
             self._registered[request_decision_sha256] = request_id
 
-    def bind_entry(self,entry_binding):
+    def bind_entry(self,entry_binding,*,call_ordinal=None):
         from .native_entry import NativeEntryBinding
         if type(entry_binding) is not NativeEntryBinding: raise TypeError('actual immutable native entry required')
         decision = entry_binding.snapshot()['entry'].get('request_decision_sha256')
         with self._controller._lock:
             request_id = self._registered.get(decision)
             if request_id is None: raise ValueError('actual entry has no registered original request')
-            self.bind_request(request_id,entry_binding)
+            self.bind_request(request_id,entry_binding,call_ordinal=call_ordinal)
             return request_id
 
     def generate_synthetic_receipt(self,request_id,scenario,*,expected_scenario_sha256,
@@ -246,7 +246,7 @@ class RecordingSettlementRecorder:
             if request_id not in self._generated: raise ValueError('no generated original fixture artifacts')
             return self._generated[request_id]
 
-    def bind_request(self,request_id,entry_binding):
+    def bind_request(self,request_id,entry_binding,*,call_ordinal=None):
         """Bind an actual dispatched request while it is still owned/opaque."""
         from .native_entry import NativeEntryBinding
         identifier(request_id)
@@ -275,8 +275,11 @@ class RecordingSettlementRecorder:
             previous,count = self._binding_entries.get(lane,(-1,0))
             if entry['entry']['entry_ordinal'] <= previous:
                 raise ValueError('recording settlement binding must follow actual entry order')
-            self._binding_entries[lane] = (entry['entry']['entry_ordinal'],count+1)
-            self._bindings[request_id] = (instance,*lane,count)
+            rank = count if call_ordinal is None else _int(call_ordinal,16383)
+            if not count <= rank <= entry['entry']['entry_ordinal']:
+                raise ValueError('explicit actual transport ordinal must preserve original entry order')
+            self._binding_entries[lane] = (entry['entry']['entry_ordinal'],rank+1)
+            self._bindings[request_id] = (instance,*lane,rank)
 
     def synthetic_receipt(self,request_id,*,source_document,financial_evidence,adapter_inventory,
                           expected_adapter_inventory_sha256,components):
@@ -293,6 +296,19 @@ class RecordingSettlementRecorder:
         if type(inventory['schema_version']) is not int or inventory['schema_version'] != 1 or inventory['kind'] != 'recording_financial_adapters':
             raise ValueError('frozen F1 inventory required')
         if type(inventory['adapters']) is not list or not 1 <= len(inventory['adapters']) <= 64: raise ValueError('bounded F1 adapters required')
+        adapter_ids = set()
+        for candidate in inventory['adapters']:
+            _keys(candidate,('adapter_id','implementation','implementation_sha256','provider','revision','evidence_class',
+                             'input_schema_sha256','output_schema_sha256','closure_capability'))
+            for field in ('adapter_id','provider','revision'): identifier(candidate[field])
+            if candidate['adapter_id'] in adapter_ids: raise ValueError('unique frozen adapter identity required')
+            adapter_ids.add(candidate['adapter_id'])
+            if (candidate['implementation'] != ADAPTER or candidate['evidence_class'] != 'fixture' or
+                    candidate['input_schema_sha256'] != _digest(INPUT_GRAMMAR) or
+                    candidate['output_schema_sha256'] != _digest(OUTPUT_GRAMMAR) or
+                    candidate['closure_capability'] not in ('explicit_original_lines_and_finality','none')):
+                raise ValueError('complete frozen synthetic F1 adapter inventory required')
+            _sha(candidate['implementation_sha256'])
         _keys(evidence,EVIDENCE_FIELDS)
         matches = [a for a in inventory['adapters'] if a.get('adapter_id') == evidence['adapter_id']]
         if len(matches) != 1: raise ValueError('unique frozen original-line adapter required')

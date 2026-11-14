@@ -16,7 +16,8 @@ def runview(arm='A',**overrides):
         clock_domain='local',clock_consistent=True,activation_started_ns=100,child_spawn_started_ns=200,
         playback_anchor_ns=300,source_finished_ns=700,child_cleanup_finished_ns=800,process_reaped_ns=900,
         parent_resources_closed_ns=1000,operational_closed=True,external_work_closed=True,
-        worker_inventory_sha256=digest([]),native_terminal_sha256='6'*64,semantic_unknown_instances=(),violations=())
+        worker_inventory_sha256=digest([]),native_terminal_sha256='6'*64,
+        controller_settlement_inventory_sha256=digest([]),semantic_unknown_instances=(),violations=())
     value.update(overrides)
     return _issue_financial_run_view(**value)
 

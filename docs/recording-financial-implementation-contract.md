@@ -123,7 +123,7 @@ The complete runtime validator issues frozen `FinancialRunView` through its
 internal issuer. This is not a JSON deserializer or a generic success attestation.
 Its exact fields are:
 
-`execution_sha256:H,run_inventory_sha256:H,invocation_ordinal:0..95,stream_id:ID,recording_id:ID,arm:ABC,source_manifest_sha256:H,source_coverage_sha256:H,source_comparable:bool,task_row_inventory_sha256:H,clock_domain:ID,clock_consistent:bool,activation_started_ns:N,child_spawn_started_ns:N|null,playback_anchor_ns:N|null,source_finished_ns:N|null,child_cleanup_finished_ns:N|null,process_reaped_ns:N|null,parent_resources_closed_ns:N|null,operational_closed:bool,external_work_closed:bool,worker_inventory_sha256:H,native_terminal_sha256:H|null,semantic_unknown_instances:tuple[H],violations:tuple[enum]`.
+`execution_sha256:H,run_inventory_sha256:H,invocation_ordinal:0..95,stream_id:ID,recording_id:ID,arm:ABC,source_manifest_sha256:H,source_coverage_sha256:H,source_comparable:bool,task_row_inventory_sha256:H,clock_domain:ID,clock_consistent:bool,activation_started_ns:N,child_spawn_started_ns:N|null,playback_anchor_ns:N|null,source_finished_ns:N|null,child_cleanup_finished_ns:N|null,process_reaped_ns:N|null,parent_resources_closed_ns:N|null,operational_closed:bool,external_work_closed:bool,worker_inventory_sha256:H,native_terminal_sha256:H|null,controller_settlement_inventory_sha256:H,semantic_unknown_instances:tuple[H],violations:tuple[enum]`.
 
 Only activation_started_ns is mandatory among lifecycle times; every unknown
 actual milestone remains null. A failed run still gets its typed view after
@@ -208,3 +208,44 @@ operation row, settled controller claim or finality/completion. Unknown-prefix
 charges do not authorize successful closure or make missing native operations
 zero. For an arm with a valid terminal, the unchanged strict bijective actual
 entry join is mandatory and a missing operation key is rejected.
+
+## Retained join memory and orphan inventories
+
+The reader's financial/native retained join index has one collection-wide
+128 MiB cap. It conservatively charges actual retained Python object sizes,
+including each row/reference/container allowance before insertion; shared
+references may be charged more than once. One bounded decoded page remains
+working memory. Source-document and metadata byte caps remain independently
+mandatory and shared ArtifactBudget charges every written byte. Exceeding the
+index cap refuses that joint combination; it does not drop entries, restart a
+per-arm budget or advertise every independent maximum as jointly supported.
+Cross-index page/chain aliases and every retained original financial file
+omitted from the declared inventories are rejected.
+
+## Actual controller settlement inventory
+
+FinancialRunView.controller_settlement_inventory_sha256 is the canonical object
+digest of all actual SDK-issued RecordingSettlementRecorder.receipts() snapshots
+for that invocation, sorted by the exact ControllerSettlement key instance.
+The concrete FinancialFixtureReceiptRouter exports the actual object inventory
+and digest; the runtime joins its retained sidecar/provenance before issuing the
+view. The financial reader requires the exact complete matching settlement
+inventory for every valid-native run. A JSON attachment alone cannot supply
+this typed authority. Empty digest([]) means actually no authoritative receipt;
+it does not clear any native historical unknown or real external liability.
+
+The recorder belongs to one invocation, although several predeclared bindings
+may use the same controller within that invocation. Router contexts, binding
+ownership, scenario bytes and adapter inventory freeze before activation. The
+router calls actual settle before the fixture response delay/decoder; generated
+source/evidence files and authoritative settlement files all consume shared
+artifact bytes. Any later file failure retains the actual charge and fails the
+run, without an optimistic published receipt.
+
+For a known fixture receipt after earlier unknown entries, bind_entry may accept
+the actual owned FixtureCompletion call_ordinal explicitly. This ordinal is
+monotonic, at least the next known binding ordinal and no greater than the
+actual native global entry_ordinal. It is never model-reported or inferred by
+clock. The reader independently reconstructs its exact per-binding rank from
+the complete native sequence and rejects any mismatch. Ordinary bind_entry
+without that argument preserves contiguous observed binding behavior.

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
 import hashlib
+from types import MappingProxyType
 
 from humansense.capabilities import identifier
 from .recording_financial import (FinancialAdapters,FinancialRunView,N63,PAGE_BYTES,array,
@@ -178,11 +179,12 @@ class ValidatedLifetimeLedger:
 
     def __init__(self,*,policy_sha256,exposure_sha256,ledger_sha256,totals,evidence_class,validity,_issuer=None):
         if _issuer is not _TOTAL_ISSUER: raise TypeError('validated full lifetime ledger required')
+        validity = MappingProxyType(dict(validity))
         for name,value in locals().copy().items():
             if name not in ('self','_issuer'): object.__setattr__(self,name,value)
 
 
-def _native_inventory(indices,runs,expected_context):
+def _native_inventory(indices,runs,expected_context,*,budget=None):
     from .recording_native_validation import ValidatedRecordingIndex,iter_canonical_inventory
     from .recording_native_schema import encoded as native_encoded
     if len(indices) != len(runs): raise ValueError('one validated native inventory per original run required')
@@ -194,12 +196,15 @@ def _native_inventory(indices,runs,expected_context):
             # Its frozen arm remains in all financial inventories and totals.
             continue
         if type(index) is not ValidatedRecordingIndex: raise TypeError('native4 typed validated inventory required')
+        if budget is not None:
+            budget.reserve_index((index.declarations,index.entries,index.hashes,index.flags,index.settlements,index.chunk_refs))
         if hashlib.sha256(native_encoded(index.terminal)+b'\n').hexdigest() != run.native_terminal_sha256:
             raise ValueError('financial join substituted another actual native terminal')
         context = index.terminal['context']
         if context['invocation_ordinal'] != run.invocation_ordinal or any(context[name] != expected for name,expected in expected_context.items()):
             raise ValueError('native terminal crosses original frozen run')
         for value in iter_canonical_inventory(index):
+            if budget is not None: budget.reserve_index(value)
             context = value['owner']['context'] if value['kind'] == 'operation' else value['context']
             if context['invocation_ordinal'] != run.invocation_ordinal: raise ValueError('native inventory crosses original run')
             if any(context[name] != expected for name,expected in expected_context.items()):
@@ -245,6 +250,7 @@ def _financial_inventory(store,value,*,adapters,policy,exposure,collection_sha25
         keys(row,('source_document',),'original source document row'); ref = reference(row['source_document'])
         if ref['file_sha256'] in documents: raise ValueError('duplicate original source document')
         document = validate_invoice(store.read(ref)); documents[ref['file_sha256']] = (ref,document)
+        store.reserve_index((ref,document))
         source_bytes += ref['bytes']
         if source_bytes > 64*1024**2: raise ValueError('original financial source byte cap exceeded')
         logical = tuple(document[k] for k in ('provider','account_scope','invoice_id'))
@@ -263,6 +269,7 @@ def _financial_inventory(store,value,*,adapters,policy,exposure,collection_sha25
         if ref['file_sha256'] not in documents: raise ValueError('financial evidence omits original document')
         original_ref,invoice = documents[ref['file_sha256']]
         row = validate_financial_evidence(row,adapters=adapters,invoice=invoice,source_reference=original_ref)
+        store.reserve_index(row)
         claim = row['claim_sha256']; object_hash = digest(row)
         if claim in claims or object_hash in evidence: raise ValueError('original claim/evidence counted more than once')
         claims.add(claim); evidence[object_hash] = row; used_lines.add(claim)
@@ -281,7 +288,7 @@ def _financial_inventory(store,value,*,adapters,policy,exposure,collection_sha25
                 raise ValueError('fixture operation key crosses actual entered native operation')
         if key is None and row['owner_instance'] is not None: raise ValueError('lifecycle meter line cannot pretend to own a semantic operation')
     if used_lines != set(original_lines): raise ValueError('orphan or omitted original invoice line')
-    financial_operations = {}; runmap = {run.invocation_ordinal:run for run in runs}
+    financial_operations = {}; runmap = {run.invocation_ordinal:run for run in runs}; actual_settlements = {}
     for row in iter_financial_rows(store,'operations',value['operation_pages']):
         keys(row,('instance','invocation_ordinal','binding_index','entry_ordinal','status','basis','evidence',
                   'controller_settlement','meter_lane'),'financial operation')
@@ -302,6 +309,7 @@ def _financial_inventory(store,value,*,adapters,policy,exposure,collection_sha25
             if semantic:
                 settlement = store.read(reference(row['controller_settlement']))
                 validate_controller_settlement(settlement,run=runmap[row['invocation_ordinal']],operation=operation,evidence=obj,policy=policy)
+                actual_settlements.setdefault(row['invocation_ordinal'],[]).append(settlement)
             elif row['controller_settlement'] is not None:
                 raise ValueError('nonsemantic callback cannot manufacture controller settlement')
         else:
@@ -310,7 +318,16 @@ def _financial_inventory(store,value,*,adapters,policy,exposure,collection_sha25
             keys(row['meter_lane'],('stream_id','component_id','resource_id','lane_id'),'operation meter lane')
             for item in row['meter_lane'].values(): identifier(item)
         financial_operations[instance] = row
+        store.reserve_index(row)
     if set(financial_operations) != set(operations): raise ValueError('omitted failed/cancelled/discarded native operation')
+    for run in runs:
+        if run.native_terminal_sha256 is None:
+            # The missing native join cannot certify absent settlement rows.
+            # All original evidence remains known-prefix/incomplete below.
+            continue
+        actual = sorted(actual_settlements.get(run.invocation_ordinal,[]),key=lambda row:row['instance'])
+        if digest(actual) != run.controller_settlement_inventory_sha256:
+            raise ValueError('controller settlement attachment differs from actual SDK-issued inventory')
     lanes = {}; locator_pages = locator_rows = 0
     for row in iter_financial_rows(store,'lanes',value['lane_closure_pages']):
         keys(row,('stream_id','component_id','resource_id','lane_id','window_start_ns','window_end_ns','status',
@@ -322,6 +339,7 @@ def _financial_inventory(store,value,*,adapters,policy,exposure,collection_sha25
         enum(row['status'],('closed','pending','unknown')); sha(row['work_inventory_sha256'])
         index = row['cost_line_inventory']; locator_pages += integer(index['page_count'])+integer(index['index_page_count']); locator_rows += integer(index['row_count'])
         lanes[lane] = row
+        store.reserve_index(row)
     if global_pages+locator_pages > 1024 or global_rows+locator_rows > 131072:
         raise ValueError('financial nested locator pages exceed global capacity')
     finality = {}; used_finality = set()
@@ -330,6 +348,7 @@ def _financial_inventory(store,value,*,adapters,policy,exposure,collection_sha25
         obj = validate_finality(store.read(ref)); h = digest(obj)
         if h in finality or obj['stream_id'] in used_finality: raise ValueError('unique original stream finality required')
         finality[h] = (ref,obj); used_finality.add(obj['stream_id'])
+        store.reserve_index((ref,obj))
     return dict(documents=documents,original_lines=original_lines,evidence=evidence,operations=financial_operations,
                 lanes=lanes,finality=finality,unverified_instances=unverified_instances)
 
@@ -450,6 +469,7 @@ def _validate_costs(store,page_refs,*,policy,runs,lifetimes,financial,operations
                     reasons[sid].add('frozen_line_rounding_mismatch')
                 totals[sid] = integer(totals[sid]+billed)
             lines[ordinal,entry_index] = (ref,line)
+            store.reserve_index((ref,line))
             locator_positions[ref['file_sha256'],entry_index] = (ordinal,entry_index)
             lane_positions.setdefault(key,set()).add((ordinal,entry_index))
             component_entries.setdefault((sid,cid),[]).append(line)
@@ -487,7 +507,7 @@ def _validate_costs(store,page_refs,*,policy,runs,lifetimes,financial,operations
                         elif not start <= row['started_ns'] <= row['ended_ns'] <= end:
                             raise ValueError('financial lifecycle window excludes actual selected work')
                 if declared['status'] != 'closed': reasons[sid].add('unclosed_required_lane')
-                locators = list(iter_financial_rows(store,'line-locators',declared['cost_line_inventory']))
+                locators = iter_financial_rows(store,'line-locators',declared['cost_line_inventory'])
                 owned = set()
                 for locator in locators:
                     keys(locator,('cost_page','entry_index'),'cost line locator')
@@ -546,7 +566,7 @@ def validate_lifetime_ledger(policy,exposure,runtime,collection,scope_protocol,i
             runtime.get('evaluation_mode') != 'matched_source_exposure_full_lifetime_v2' or
             runtime.get('numeric_policy_sha256') != expected_exposure_sha256 or
             runtime.get('accounting_policy_sha256') != expected_policy_sha256 or
-            collection.get('runtime_policy_sha256') != digest(runtime) or
+            collection.get('runtime_policy_sha256') != plan_digest(runtime) or
             type(scope_protocol.get('schema_version')) is not int or scope_protocol['schema_version'] != 2 or
             scope_protocol.get('recording_reconciliation_sha256') != expected_exposure_sha256 or
             scope_protocol.get('stream_protocol_sha256') != expected_policy_sha256 or
@@ -562,7 +582,7 @@ def validate_lifetime_ledger(policy,exposure,runtime,collection,scope_protocol,i
         'lifetimes','coverage','entry_pages','financial_inventory','closure'),'lifetime ledger2')
     _schema(ledger,2,'recording_lifetime_ledger')
     for key,expected in (('accounting_policy_sha256',expected_policy_sha256),('exposure_policy_sha256',expected_exposure_sha256),
-            ('runtime_policy_sha256',digest(runtime)),('collection_sha256',digest(collection)),
+            ('runtime_policy_sha256',plan_digest(runtime)),('collection_sha256',digest(collection)),
             ('scope_protocol_sha256',digest(scope_protocol)),('comparison_plan_sha256',plan_digest(plan))):
         if ledger[key] != expected: raise ValueError('ledger frozen upstream binding differs')
     identifier(ledger['reviewer']); sha(ledger['source_evidence_sha256'])
@@ -587,7 +607,7 @@ def validate_lifetime_ledger(policy,exposure,runtime,collection,scope_protocol,i
         coverage.add(matches[0])
     if set(lifetimes) != set(streams) or coverage != set(streams): raise ValueError('omitted lifetime or source coverage')
     operations,work,operation_keys = _native_inventory(native_indices,runs,dict(collection_sha256=digest(collection),
-        scope_protocol_sha256=digest(scope_protocol),instrumentation_protocol_sha256=digest(instrumentation)))
+        scope_protocol_sha256=digest(scope_protocol),instrumentation_protocol_sha256=digest(instrumentation)),budget=store)
     if store.read(reference(ledger['financial_inventory'])) != financial_inventory: raise ValueError('financial inventory artifact differs')
     financial = _financial_inventory(store,financial_inventory,adapters=adapters,policy=policy,exposure=exposure,
         collection_sha256=digest(collection),operations=operations,keys_to_instance=operation_keys,runs=runs)
@@ -630,6 +650,8 @@ def validate_lifetime_ledger(policy,exposure,runtime,collection,scope_protocol,i
             if h not in financial['finality'] or financial['finality'][h] != (finality_ref,finality_obj): raise ValueError('closure finality not in complete frozen F1 inventory')
             if finality_obj['stream_id'] != sid or finality_obj['execution_sha256'] != run.execution_sha256 or finality_obj['accounting_policy_sha256'] != expected_policy_sha256:
                 raise ValueError('finality crosses original stream/execution/policy')
+            if not any(a['closure_capability'] == 'explicit_original_lines_and_finality' for a in adapters.adapters):
+                raise ValueError('frozen adapter inventory has no supported original finality capability')
             docs = sorted(ref['file_sha256'] for ref,document in financial['documents'].values() if any(line['stream_id'] == sid for line in document['lines']))
             if finality_obj['source_document_sha256'] != docs: raise ValueError('finality omits original invoice documents')
             operation_rows = [o for o in financial['operations'].values() if o['invocation_ordinal'] == run.invocation_ordinal]
@@ -659,6 +681,12 @@ def validate_lifetime_ledger(policy,exposure,runtime,collection,scope_protocol,i
     if set(closure_map) != set(streams): raise ValueError('omitted failed original closure')
     for ref,obj in validity_entries:
         if store.read(reference(ref)) != obj: raise ValueError('retained validity file differs from pinned chain')
+    notice_refs=[]
+    for _,entry in validity_entries:
+        if entry['notice'] is not None:
+            ref=reference(entry['notice']);notice_refs.append(ref)
+            if ref['file_sha256'] not in late_notices or store.read(ref)!=late_notices[ref['file_sha256']]:
+                raise ValueError('retained original late notice differs from current reviewed chain')
     for noticed_hash,notice in late_notices.items():
         if notice['stream_id'] not in closure_map or notice['closure_sha256'] != closure_map[notice['stream_id']]:
             raise ValueError('late notice crosses original sealed stream closure')
@@ -670,6 +698,7 @@ def validate_lifetime_ledger(policy,exposure,runtime,collection,scope_protocol,i
     validity = validate_validity_chain(validity_entries,validity_checkpoint,expected_checkpoint_sha256=expected_checkpoint_sha256,
         exposure_policy_sha256=expected_exposure_sha256,ledger_sha256=expected_ledger_sha256,sealed_ns=final_seal,notices=late_notices)
     store.assert_financial_inventory()
+    store.assert_validity_inventory(notice_refs,[ref for ref,_ in validity_entries])
     result = []
     for run in runs:
         sid = run.stream_id; stream = streams[sid]

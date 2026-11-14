@@ -23,11 +23,18 @@ class ValidatedQualityLatency:
     assessment_sha256: str
     report_sha256: str
     reports: object
+    runtime_policy_sha256: str
+    collection_sha256: str
+    execution_inventory_sha256: str
 
-    def __init__(self,plan_sha256,assessment_sha256,reports,*,_issuer=None):
+    def __init__(self,plan_sha256,assessment_sha256,reports,*,runtime_policy_sha256,
+                 collection_sha256,execution_inventory_sha256,_issuer=None):
         if _issuer is not _QUALITY_ISSUER: raise TypeError('validated original quality/latency report required')
         object.__setattr__(self,'comparison_plan_sha256',plan_sha256)
         object.__setattr__(self,'assessment_sha256',assessment_sha256)
+        object.__setattr__(self,'runtime_policy_sha256',runtime_policy_sha256)
+        object.__setattr__(self,'collection_sha256',collection_sha256)
+        object.__setattr__(self,'execution_inventory_sha256',execution_inventory_sha256)
         # Keep immutable canonical bytes, not mutable caller dictionaries.
         object.__setattr__(self,'reports',encode(reports,16*1024**2))
         object.__setattr__(self,'report_sha256',hashlib.sha256(self.reports).hexdigest())
@@ -76,6 +83,10 @@ def compare_quality_latency(plan,assessment,receipts,*,expected_assessment_sha25
             if receipt[key] is not None: integer(receipt[key])
         if receipt['status'] not in ('answer','late_answer','failed','not_executed'):
             raise ValueError('original receipt status required')
+        if receipt['failure_reason'] not in ('completed','not_executed','snapshot_failed','oversize','busy','stale',
+                'admission_refused','timeout','cancelled','backend_failed','source_failed','clock_discontinuity',
+                'transport_failed','writer_failed','no_receipt','child_failed','protocol_failed'):
+            raise ValueError('finite original child/parent failure reason required')
         if receipt['status'] == 'answer' and (receipt['answer_sha256'] is None or receipt['result_sha256'] is None or
                 receipt['received_ns'] is None or receipt['failure_reason'] != 'completed'):
             raise ValueError('accepted original receipt must retain its actual result/answer/time')
@@ -116,7 +127,9 @@ def compare_quality_latency(plan,assessment,receipts,*,expected_assessment_sha25
         result[candidate+'_vs_A'] = dict(exact_point=dict(latency_ratio=str(point[0]),quality_delta=str(point[1])),
             exact_paired_bootstrap_95=dict(latency_ratio=list(map(str,intervals[0])),quality_delta=list(map(str,intervals[1]))),
             gates=gates,meets_quality_latency_gates=all(gates.values()),missing_critical_facts=missing)
-    return ValidatedQualityLatency(plan_digest(plan),expected_assessment_sha256,result,_issuer=_QUALITY_ISSUER)
+    return ValidatedQualityLatency(plan_digest(plan),expected_assessment_sha256,result,
+        runtime_policy_sha256=assessment['runtime_policy_sha256'],collection_sha256=assessment['collection_sha256'],
+        execution_inventory_sha256=assessment['execution_inventory_sha256'],_issuer=_QUALITY_ISSUER)
 
 
 def reconcile_exposure(plan,exposure,recordings,ledger,quality_latency,*,runtime_policy_sha256,
@@ -131,6 +144,10 @@ def reconcile_exposure(plan,exposure,recordings,ledger,quality_latency,*,runtime
     if allocation_sha256 is not None: raise ValueError('allocation adapter not yet reviewed for lifetime2; cannot accept an old allocation')
     for value in (runtime_policy_sha256,collection_sha256,scope_protocol_sha256,
                   instrumentation_protocol_sha256,execution_inventory_sha256): sha(value)
+    if (quality_latency.runtime_policy_sha256 != runtime_policy_sha256 or
+            quality_latency.collection_sha256 != collection_sha256 or
+            quality_latency.execution_inventory_sha256 != execution_inventory_sha256):
+        raise ValueError('quality/latency assessment crosses the original validated runtime collection')
     from .recording_financial import decode
     quality = decode(quality_latency.reports,16*1024**2)
     by_group = {}; original = {g['recording_id']:g for g in recordings['groups']}

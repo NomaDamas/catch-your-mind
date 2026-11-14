@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import sys
 
 from humansense.capabilities import identifier
 from humansense.recording_settlement import (AUTHORITY,ADAPTER,INVOICE_FIELDS,LINE_FIELDS,
@@ -67,6 +68,7 @@ class FinancialRunView:
     external_work_closed: bool
     worker_inventory_sha256: str
     native_terminal_sha256: object
+    controller_settlement_inventory_sha256: str
     semantic_unknown_instances: tuple
     violations: tuple
 
@@ -75,7 +77,8 @@ class FinancialRunView:
             raise TypeError('FinancialRunView must be issued by the complete recording join')
         keys(values,self.__dataclass_fields__,'financial run view')
         for name in ('execution_sha256','run_inventory_sha256','source_manifest_sha256',
-                     'source_coverage_sha256','task_row_inventory_sha256','worker_inventory_sha256'):
+                     'source_coverage_sha256','task_row_inventory_sha256','worker_inventory_sha256',
+                     'controller_settlement_inventory_sha256'):
             sha(values[name])
         nullable(values['native_terminal_sha256'],sha)
         for name in ('stream_id','recording_id','clock_domain'): identifier(values[name])
@@ -322,10 +325,17 @@ def validate_finality(value):
     return value
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True,init=False)
 class FinancialAdapters:
     digest: str
-    adapters: tuple
+    _encoded_adapters: tuple
+
+    def __init__(self,digest,adapters):
+        object.__setattr__(self,'digest',digest)
+        object.__setattr__(self,'_encoded_adapters',tuple(encode(a) for a in adapters))
+
+    @property
+    def adapters(self): return tuple(decode(a) for a in self._encoded_adapters)
 
     def get(self, adapter_id):
         for adapter in self.adapters:
@@ -421,10 +431,36 @@ class FinancialArtifacts:
         self._identity = os.fstat(self._fd)
         self._budget = budget
         self._closed = False
-        self._metadata = self._source = self._pages = self._rows = 0
+        self._metadata = self._source = self._pages = self._rows = self._total_bytes = 0
         self._files = set()
         self._section_files = {}
         self._read_files = {}; self._read_source = self._read_metadata = self._read_total = 0
+        self._index_bytes = 0; self._claimed_chains = set(); self._claimed_pages = set();self._receipt_ordinal=0
+
+    def allocate_receipt_ordinal(self):
+        self._check()
+        if self._receipt_ordinal >= 16384: raise ValueError('collection receipt artifact capacity exhausted')
+        ordinal=self._receipt_ordinal;self._receipt_ordinal+=1
+        return ordinal
+
+    def reserve_index(self,value):
+        """Conservative actual Python join-index bound, shared by this reader.
+
+        Shared references are deliberately charged again rather than trusted to
+        make an independently maximum combination fit. One bounded decoded
+        page is temporary working memory outside the retained index.
+        """
+        def size(item,depth=0):
+            if depth > 64: raise ValueError('financial index depth exceeded')
+            amount = sys.getsizeof(item)
+            if isinstance(item,dict):
+                amount += sum(size(k,depth+1)+size(v,depth+1)+32 for k,v in item.items())
+            elif isinstance(item,(list,tuple)): amount += sum(size(v,depth+1)+16 for v in item)
+            return amount
+        amount = size(value)+256
+        if self._index_bytes+amount > 128*1024**2:
+            raise ValueError('joint financial/native retained join index exceeds 128 MiB')
+        self._index_bytes += amount
 
     def close(self):
         if not self._closed:
@@ -466,6 +502,8 @@ class FinancialArtifacts:
 
     def read(self,ref,*,maximum=PAGE_BYTES):
         reference(ref); self._path(ref['path'])
+        if ref['path'].startswith('financial/source/source-') and ref['path'] != 'financial/source/source-'+ref['file_sha256']+'.json':
+            raise ValueError('original source filename must preserve exact file hash')
         if ref['bytes'] > maximum:
             raise ValueError('financial reference exceeds file bound')
         identity = (ref['file_sha256'],ref['bytes'])
@@ -507,7 +545,11 @@ class FinancialArtifacts:
 
     def write(self,path,value,*,source=False):
         self._path(path)
-        data = encode(value,PAGE_BYTES,newline=True)
+        actual_source=path.startswith('financial/source/source-')
+        if source and not actual_source: raise ValueError('original source flag requires fixed source path')
+        source=actual_source
+        maximum = 128*1024**2 if path == 'ledger/ledger.json' else PAGE_BYTES
+        data = encode(value,maximum,newline=True)
         if path in self._files:
             raise ValueError('financial artifact cannot be rewritten')
         if source:
@@ -516,10 +558,13 @@ class FinancialArtifacts:
             if self._source+len(data) > MAX_METADATA:
                 raise ValueError('financial original source bytes exhausted')
             self._source += len(data)
-        else:
+        elif path.startswith('financial/'):
             if self._metadata+len(data) > MAX_METADATA:
                 raise ValueError('financial metadata bytes exhausted')
             self._metadata += len(data)
+        if self._total_bytes+len(data) > 4*1024**3:
+            raise ValueError('collection financial/ledger artifact bytes exhausted')
+        self._total_bytes += len(data)
         if self._budget is not None:
             self._budget.reserve(len(data))
         self._files.add(path)
@@ -616,6 +661,22 @@ class FinancialArtifacts:
         if found != {path for path in self._read_files if path.startswith('financial/')}:
             raise ValueError('orphan/omitted original financial evidence or late invoice')
 
+    def assert_validity_inventory(self,notice_refs,validity_refs):
+        expected={reference(ref)['path'] for ref in (*notice_refs,*validity_refs)}
+        found=set();count=0
+        directory,name=self._open_parent('ledger/checkpoint.json')
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    count+=1
+                    if count>524288:raise ValueError('bounded retained ledger file inventory required')
+                    if entry.name.startswith(('late-','validity-')):
+                        path='ledger/'+entry.name;self._path(path)
+                        if not entry.is_file(follow_symlinks=False):raise ValueError('regular retained validity/notice file required')
+                        found.add(path)
+        finally:os.close(directory)
+        if found!=expected:raise ValueError('known retained late notice/validity entry omitted from reviewed chain')
+
 
 def iter_financial_rows(store,section,index):
     """Validate bounded index-chain and stream rows in original committed order."""
@@ -631,6 +692,9 @@ def iter_financial_rows(store,section,index):
     if not pages or count != (pages+127)//128 or pages+count > MAX_PAGES:
         raise ValueError('financial index page/count mismatch')
     tail = reference(index['index_tail'])
+    chain = (section,tail['path'],tail['file_sha256'])
+    if chain in store._claimed_chains: raise ValueError('financial index aliased by another inventory')
+    store._claimed_chains.add(chain)
     match = re.fullmatch('financial/'+section+r'/index-([0-9]{6})\.json',tail['path'])
     if match is None: raise ValueError('fixed financial index tail path required')
     final_file_ordinal = int(match.group(1))
@@ -677,6 +741,8 @@ def iter_financial_rows(store,section,index):
         path = 'financial/'+section+'/page-%06d.json'%(first_file_ordinal+ordinal)
         if ref['path'] != path or ref['file_sha256'] in seen:
             raise ValueError('duplicate/aliased financial page')
+        if ref['path'] in store._claimed_pages: raise ValueError('financial page reused across independent indexes')
+        store._claimed_pages.add(ref['path'])
         seen.add(ref['file_sha256'])
         page = store.read(ref)
         keys(page,('schema_version','kind','page_ordinal','previous_page_sha256','rows'),'financial data page')
